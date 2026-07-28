@@ -11,12 +11,7 @@ A modern, professional fleet management application designed for tracking vehicl
    npm install
    ```
 
-2. Configure environment variables in `.env.local`:
-   ```bash
-   VITE_TRANSLATION_API_KEY="your-translation-api-key"
-   ```
-
-3. Run the application locally:
+2. Run the application locally:
    ```bash
    npm run dev
    ```
