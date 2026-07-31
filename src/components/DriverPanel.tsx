@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, query, addDoc, updateDoc, doc } from 'firebase/firestore';
 import { Driver, Vehicle, Trip } from '../types';
-import { ShieldCheck, AlertCircle, Wrench, Play, Square, Truck, Route, Clock, CheckCircle2, Check, ArrowLeft } from 'lucide-react';
+import { ShieldCheck, AlertCircle, Wrench, Play, Square, Truck, Route, Clock, CheckCircle2, Check, ArrowLeft, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDuration } from '../utils';
 
@@ -24,8 +24,15 @@ export default function DriverPanel() {
   const [selectedVehicleId, setSelectedVehicleId] = useState('');
   const savedDriver = drivers.find(d => d.id === selectedDriverId);
   
-  const [step, setStep] = useState<'setup' | 'condition' | 'checklist' | 'waiting_service' | 'ready' | 'driving'>('setup');
+  const [step, setStep] = useState<'setup' | 'condition' | 'checklist' | 'waiting_service' | 'ready' | 'driving' | 'post_condition' | 'post_checklist'>('setup');
   const [condition, setCondition] = useState<'ok' | 'not_ok' | null>(null);
+  
+  // Post-Trip States
+  const [postCondition, setPostCondition] = useState<'ok' | 'not_ok' | null>(null);
+  const [postChecklist, setPostChecklist] = useState<Record<string, boolean>>({});
+  const [postRemarks, setPostRemarks] = useState('');
+  const [postIsDriveable, setPostIsDriveable] = useState<boolean | null>(null);
+  const [postServiceNeeded, setPostServiceNeeded] = useState(false);
 
   const [currentTime, setCurrentTime] = useState(new Date());
 
@@ -49,6 +56,13 @@ export default function DriverPanel() {
       }
     }
   }, [drivers, selectedDriverId]);
+  
+  // Recovery state
+  const [sessionRecovered, setSessionRecovered] = useState(false);
+
+  useEffect(() => {
+    setSessionRecovered(false);
+  }, [selectedDriverId]);
   
   // Checklist State
   const [checklist, setChecklist] = useState<Record<string, boolean>>({});
@@ -85,6 +99,11 @@ export default function DriverPanel() {
       } else {
         setStep('checklist');
       }
+    } else if (step === 'post_condition') {
+      setStep('driving');
+    } else if (step === 'post_checklist') {
+      setStep('post_condition');
+      setPostCondition(null);
     }
   };
 
@@ -104,7 +123,7 @@ export default function DriverPanel() {
   }, []);
   // Restore active trip or service status on page reload/driver changes
   useEffect(() => {
-    if (!selectedDriverId || trips.length === 0) return;
+    if (!selectedDriverId || trips.length === 0 || sessionRecovered) return;
     
     if (step === 'setup') {
       const activeTrip = trips.find(t => t.driverId === selectedDriverId && t.status === 'active');
@@ -112,18 +131,22 @@ export default function DriverPanel() {
         setActiveTripId(activeTrip.id);
         setSelectedVehicleId(activeTrip.vehicleId);
         setStep('driving');
+        setSessionRecovered(true);
         return;
       }
       
-      const waitingTrip = trips.find(t => t.driverId === selectedDriverId && t.status === 'waiting_service');
+      const waitingTrip = trips.find(t => t.driverId === selectedDriverId && (t.status === 'waiting_service' || (t.status === 'completed' && t.endServiceNeeded)));
       if (waitingTrip) {
         setActiveTripId(waitingTrip.id);
         setSelectedVehicleId(waitingTrip.vehicleId);
         setStep('waiting_service');
+        setSessionRecovered(true);
         return;
       }
+      
+      setSessionRecovered(true);
     }
-  }, [selectedDriverId, trips, step]);
+  }, [selectedDriverId, trips, step, sessionRecovered]);
   // Listen to active trip changes (e.g. admin updating service status)
   useEffect(() => {
     if (!activeTripId) return;
@@ -141,7 +164,14 @@ export default function DriverPanel() {
   const handleSetupNext = () => {
     if (selectedDriverId && selectedVehicleId) {
       localStorage.setItem('fleetflow_driver_id', selectedDriverId);
-      setStep('condition');
+      // Check if chosen vehicle has any pending service requests (pre-trip or post-trip)
+      const vehicleServiceTrip = trips.find(t => t.vehicleId === selectedVehicleId && (t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded)));
+      if (vehicleServiceTrip) {
+        setActiveTripId(vehicleServiceTrip.id);
+        setStep('waiting_service');
+      } else {
+        setStep('condition');
+      }
     }
   };
 
@@ -220,37 +250,61 @@ export default function DriverPanel() {
     }
   };
 
-  const handleEndDriving = async () => {
+  const handleEndDriving = () => {
+    setStep('post_condition');
+  };
+
+  const handlePostConditionSelect = async (isOk: boolean) => {
     if (!activeTripId) return;
+    setPostCondition(isOk ? 'ok' : 'not_ok');
     
+    if (isOk) {
+      const endTime = Date.now();
+      const docRef = doc(db, 'trips', activeTripId);
+      const { getDoc } = await import('firebase/firestore');
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        const tripData = snap.data() as Trip;
+        const duration = tripData.startTime ? (endTime - tripData.startTime) : 0;
+        await updateDoc(docRef, {
+          status: 'completed',
+          endTime: endTime,
+          duration: duration,
+          endCondition: 'ok',
+          endServiceNeeded: false
+        });
+      }
+      resetAllStates();
+    } else {
+      setStep('post_checklist');
+    }
+  };
+
+  const handlePostChecklistSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTripId || postIsDriveable === null) return;
+
     const endTime = Date.now();
     const docRef = doc(db, 'trips', activeTripId);
-    
-    // In a real app we'd fetch the startTime from the DB or state, assuming we have it locally if we started it
-    // To be safe and simple, we let a cloud function or simple subtraction handle it if we stored start time.
-    // We'll just fetch current time. Since we only just created it, we can calculate roughly or fetch.
-    // Best way: just store endTime and calculate duration now.
-    // For exactness, we'd read the doc, but we can assume we know it's about now minus when we clicked start.
-    // Let's just do a simple read to be accurate, or just trust the DB will update it.
-    
-    // Since we need duration to save to DB, let's just record endTime and let a cloud func do it? No, we calculate here.
-    // We don't have startTime in state cleanly, let's assume we can just pass endTime. 
-    // Actually, we can fetch it or just use a local startTime state.
-    
-    // Let's fetch the document to get the exact start time to calculate duration accurately.
     const { getDoc } = await import('firebase/firestore');
     const snap = await getDoc(docRef);
     if (snap.exists()) {
       const tripData = snap.data() as Trip;
-      const duration = endTime - tripData.startTime;
+      const duration = tripData.startTime ? (endTime - tripData.startTime) : 0;
       await updateDoc(docRef, {
         status: 'completed',
         endTime: endTime,
-        duration: duration
+        duration: duration,
+        endCondition: 'not_ok',
+        endChecklist: postChecklist,
+        endRemarks: postRemarks,
+        endServiceNeeded: !postIsDriveable || postServiceNeeded
       });
     }
+    resetAllStates();
+  };
 
-    // Reset for next driver
+  const resetAllStates = () => {
     setStep('setup');
     setSelectedVehicleId('');
     setCondition(null);
@@ -258,11 +312,21 @@ export default function DriverPanel() {
     setRemarks('');
     setIsDriveable(null);
     setServiceNeeded(false);
+    
+    setPostCondition(null);
+    setPostChecklist({});
+    setPostRemarks('');
+    setPostIsDriveable(null);
+    setPostServiceNeeded(false);
     setActiveTripId(null);
   };
 
   const toggleChecklist = (item: string) => {
     setChecklist(prev => ({ ...prev, [item]: !prev[item] }));
+  };
+
+  const togglePostChecklist = (item: string) => {
+    setPostChecklist(prev => ({ ...prev, [item]: !prev[item] }));
   };
 
   const myTrips = trips.filter(t => t.driverId === selectedDriverId);
@@ -662,6 +726,158 @@ export default function DriverPanel() {
                     <Square className="w-5 h-5 fill-current" />
                     End Trip
                   </button>
+                </motion.div>
+              )}
+
+              {step === 'post_condition' && (
+                <motion.div 
+                  key="post_condition"
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 1.05 }}
+                  className="space-y-6"
+                >
+                  <div className="text-center py-4">
+                    <Wrench className="w-12 h-12 text-slate-900 mx-auto mb-3" />
+                    <h2 className="text-2xl font-bold text-slate-800">Post-Trip Check</h2>
+                    <p className="text-slate-500 mt-1">Please report the vehicle status after your trip.</p>
+                  </div>
+
+                  <h3 className="text-lg font-semibold text-slate-700 text-center">
+                    Is the vehicle in good condition after the trip?
+                  </h3>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <button 
+                      onClick={() => handlePostConditionSelect(true)}
+                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white"
+                    >
+                      <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
+                        <Check className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
+                      </div>
+                      <span className="font-bold text-slate-800">All Good</span>
+                      <span className="text-xs text-slate-400 mt-1">No issues arose during the trip</span>
+                    </button>
+
+                    <button 
+                      onClick={() => handlePostConditionSelect(false)}
+                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white"
+                    >
+                      <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
+                        <AlertTriangle className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
+                      </div>
+                      <span className="font-bold text-slate-800">Report Issue</span>
+                      <span className="text-xs text-slate-400 mt-1">Report a problem or damage</span>
+                    </button>
+                  </div>
+                  
+                  <div className="border-t border-slate-100 pt-4 flex justify-center">
+                    <button
+                      onClick={() => setStep('driving')}
+                      className="text-sm font-semibold text-slate-500 hover:text-slate-800 py-2 px-4 transition-colors"
+                    >
+                      Cancel & Return to Trip
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {step === 'post_checklist' && (
+                <motion.div 
+                  key="post_checklist"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className="space-y-6"
+                >
+                  <div className="text-center">
+                    <h2 className="text-2xl font-bold text-slate-800">Post-Trip Issue Report</h2>
+                    <p className="text-slate-500 text-sm mt-1">Please select the items that are NOT OK after the trip.</p>
+                  </div>
+
+                  <form onSubmit={handlePostChecklistSubmit} className="space-y-6">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {CHECKLIST_ITEMS.map(item => (
+                        <button
+                          key={item}
+                          type="button"
+                          onClick={() => togglePostChecklist(item)}
+                          className={`p-3 rounded-xl border text-xs font-semibold transition-all text-left flex items-center justify-between ${postChecklist[item] ? 'border-slate-900 bg-slate-50 text-slate-900 ring-1 ring-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                        >
+                          <span>{item}</span>
+                          <span className={`w-4 h-4 rounded-full border flex items-center justify-center ${postChecklist[item] ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>
+                            {postChecklist[item] && <Check className="w-2.5 h-2.5 stroke-[3]" />}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="block text-sm font-medium text-slate-700">Remarks / Description of Issue</label>
+                      <textarea
+                        value={postRemarks}
+                        onChange={e => setPostRemarks(e.target.value)}
+                        placeholder="Please describe any issues in detail..."
+                        rows={3}
+                        className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800 text-sm"
+                      />
+                    </div>
+
+                    <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                      <label className="block text-sm font-bold text-slate-800">Is the vehicle okay to drive now?</label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => { setPostIsDriveable(true); setPostServiceNeeded(false); }}
+                          className={`py-3 rounded-lg border text-sm font-semibold transition-all ${postIsDriveable === true ? 'border-slate-900 bg-white text-slate-900 ring-1 ring-slate-900 shadow-sm' : 'border-slate-250 text-slate-600 hover:bg-slate-100/50 bg-white/50'}`}
+                        >
+                          Yes, OK to Drive
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setPostIsDriveable(false); setPostServiceNeeded(true); }}
+                          className={`py-3 rounded-lg border text-sm font-semibold transition-all ${postIsDriveable === false ? 'border-slate-900 bg-white text-slate-900 ring-1 ring-slate-900 shadow-sm' : 'border-slate-250 text-slate-600 hover:bg-slate-100/50 bg-white/50'}`}
+                        >
+                          No, Request Service
+                        </button>
+                      </div>
+                    </div>
+
+                    {postIsDriveable === true && (
+                      <label className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:bg-slate-50 cursor-pointer transition-colors bg-white">
+                        <input
+                          type="checkbox"
+                          checked={postServiceNeeded}
+                          onChange={e => setPostServiceNeeded(e.target.checked)}
+                          className="w-4 h-4 rounded text-slate-900 focus:ring-slate-900 border-slate-350"
+                        />
+                        <div>
+                          <span className="text-sm font-bold text-slate-800 block">Request Maintenance</span>
+                          <span className="text-xs text-slate-500 block">The vehicle is driveable but needs a checkup/service.</span>
+                        </div>
+                      </label>
+                    )}
+
+                    <div className="flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStep('post_condition');
+                          setPostCondition(null);
+                        }}
+                        className="flex-1 py-3.5 border border-slate-200 hover:bg-slate-50 rounded-xl font-semibold text-slate-600 text-sm transition-colors"
+                      >
+                        Back
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={postIsDriveable === null}
+                        className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-bold text-sm shadow-md hover:bg-slate-800 transition-all disabled:opacity-50 active:scale-98"
+                      >
+                        Submit & End Trip
+                      </button>
+                    </div>
+                  </form>
                 </motion.div>
               )}
             </AnimatePresence>

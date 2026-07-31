@@ -3,7 +3,7 @@ import { db } from '../firebase';
 import { collection, addDoc, updateDoc, doc, onSnapshot, query, deleteDoc } from 'firebase/firestore';
 import { Driver, Vehicle, Trip } from '../types';
 import { formatDuration, formatTime } from '../utils';
-import { ShieldAlert, CheckCircle2, AlertTriangle, Clock, Wrench, ChevronDown, ChevronUp, Settings, Users, Trash2, Edit2, Car, Phone, Download, Truck, Route, Lock, LogOut } from 'lucide-react';
+import { ShieldAlert, CheckCircle2, AlertTriangle, Clock, Wrench, ChevronDown, ChevronUp, Settings, Users, Trash2, Edit2, Car, Phone, Download, Truck, Route, Lock, LogOut, Image, X } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
 
 export default function AdminPanel() {
@@ -25,7 +25,6 @@ export default function AdminPanel() {
       localStorage.setItem('fleetflow_admin_auth', 'true');
       setIsAuthenticated(true);
       setLoginError('');
-      setPassword('');
     } else {
       setLoginError('Invalid password. Please try again.');
     }
@@ -52,14 +51,32 @@ export default function AdminPanel() {
   const [resolvingTripId, setResolvingTripId] = useState<string | null>(null);
   const [resolvingTripStatus, setResolvingTripStatus] = useState<string | null>(null);
 
+  // New Resolve dialog states
+  const [serviceType, setServiceType] = useState<'performed' | 'no_service'>('performed');
+  const [serviceCostInput, setServiceCostInput] = useState('');
+  const [serviceLocationInput, setServiceLocationInput] = useState('');
+  const [billImageBase64, setBillImageBase64] = useState('');
+
+  // Date filters
+  const [historyStartDate, setHistoryStartDate] = useState('');
+  const [historyEndDate, setHistoryEndDate] = useState('');
+  const [costsStartDate, setCostsStartDate] = useState('');
+  const [costsEndDate, setCostsEndDate] = useState('');
+  const [serviceTypeFilter, setServiceTypeFilter] = useState<'all' | 'performed' | 'no_service'>('all');
+
+  // Image preview modal
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+
   const [activeTripsPage, setActiveTripsPage] = useState(1);
   const [serviceRequestsPage, setServiceRequestsPage] = useState(1);
+  const [resolvedCostsPage, setResolvedCostsPage] = useState(1);
   const [historyPage, setHistoryPage] = useState(1);
   const [driversPage, setDriversPage] = useState(1);
   const [vehiclesPage, setVehiclesPage] = useState(1);
   const [statsPage, setStatsPage] = useState(1);
   
   const [driverFilter, setDriverFilter] = useState<string>('');
+  const [serviceRequestsTab, setServiceRequestsTab] = useState<'pending' | 'resolved'>('pending');
   const ITEMS_PER_PAGE = 5;
 
   useEffect(() => {
@@ -167,6 +184,10 @@ export default function AdminPanel() {
   };
 
   const confirmResolve = (tripId: string, currentStatus: string) => {
+    setServiceType('performed');
+    setServiceCostInput('');
+    setServiceLocationInput('');
+    setBillImageBase64('');
     setResolvingTripId(tripId);
     setResolvingTripStatus(currentStatus);
   };
@@ -174,32 +195,68 @@ export default function AdminPanel() {
   const handleConfirmResolve = async () => {
     if (!resolvingTripId || !resolvingTripStatus) return;
     
-    if (resolvingTripStatus === 'waiting_service') {
-      await updateDoc(doc(db, 'trips', resolvingTripId), {
-        status: 'service_completed',
-        serviceNeeded: false
-      });
-    } else {
-      await updateDoc(doc(db, 'trips', resolvingTripId), {
-        serviceNeeded: false
-      });
+    try {
+      const updateData: any = {
+        serviceNeeded: false,
+        endServiceNeeded: false,
+        resolvedAt: Date.now(),
+        serviceType: serviceType
+      };
+
+      if (serviceType === 'performed') {
+        updateData.serviceCost = Number(serviceCostInput) || 0;
+        updateData.serviceLocation = serviceLocationInput.trim();
+        if (billImageBase64) {
+          updateData.billImage = billImageBase64;
+        }
+      }
+
+      if (resolvingTripStatus === 'waiting_service') {
+        updateData.status = 'service_completed';
+      }
+
+      await updateDoc(doc(db, 'trips', resolvingTripId), updateData);
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to resolve request: ' + (err.message || err));
     }
     
     setResolvingTripId(null);
     setResolvingTripStatus(null);
+    setServiceType('performed');
+    setServiceCostInput('');
+    setServiceLocationInput('');
+    setBillImageBase64('');
   };
 
   const downloadHistoryAsCSV = () => {
-    const headers = ['Driver Name', 'Vehicle Identifier', 'Start Time', 'End Time', 'Duration', 'Service Required', 'Remarks'];
-    const rows = completedTrips.map(trip => {
+    const headers = [
+      'Date',
+      'Driver Name', 
+      'Vehicle Identifier', 
+      'Start Time', 
+      'End Time', 
+      'Duration', 
+      'Before Trip Condition', 
+      'Before Trip Remarks', 
+      'After Trip Condition', 
+      'After Trip Remarks'
+    ];
+    const rows = filteredCompletedTrips.map(trip => {
+      const beforeChecks = trip.condition === 'ok' ? 'All Good' : 'Issues Reported';
+      const afterChecks = trip.endCondition === 'ok' ? 'All Good' : (trip.endCondition === 'not_ok' ? 'Issues Reported' : '-');
+      const tripDate = trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
       return [
+        `"${tripDate}"`,
         `"${trip.driverName}"`,
         `"${trip.vehicleName}"`,
         `"${trip.startTime ? formatTime(trip.startTime) : 'Unknown'}"`,
         `"${trip.endTime ? formatTime(trip.endTime) : 'Unknown'}"`,
         `"${trip.startTime && trip.endTime && trip.duration ? formatDuration(trip.duration) : '-'}"`,
-        `"${trip.serviceNeeded ? 'Yes' : 'No'}"`,
-        `"${(trip.remarks || '').replace(/"/g, '""')}"`
+        `"${beforeChecks}"`,
+        `"${(trip.remarks || '').replace(/"/g, '""')}"`,
+        `"${afterChecks}"`,
+        `"${(trip.endRemarks || '').replace(/"/g, '""')}"`
       ];
     });
     
@@ -208,7 +265,7 @@ export default function AdminPanel() {
       ...rows.map(e => e.join(','))
     ].join('\n');
     
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
@@ -219,13 +276,129 @@ export default function AdminPanel() {
     document.body.removeChild(link);
   };
 
+  const downloadCostsAsCSV = () => {
+    const headers = [
+      'Vehicle Identifier',
+      'Driver Name',
+      'Reported Date',
+      'Reported Time',
+      'Resolved Date',
+      'Resolved Time',
+      'Service Type',
+      'Shop / Dealer',
+      'Cost (OMR)',
+      'Issues Reported',
+      'Receipt Status'
+    ];
+    const rows = filteredResolvedTrips.map(trip => {
+      const repDate = trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
+      const reportTime = trip.startTime ? formatTime(trip.startTime) : 'Unknown';
+      const resDate = trip.resolvedAt ? new Date(trip.resolvedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
+      const resolvedTime = trip.resolvedAt ? formatTime(trip.resolvedAt) : 'Unknown';
+      const sType = trip.serviceType === 'no_service' ? 'Solved Without Service' : 'Service Performed';
+      const costStr = trip.serviceType === 'no_service' ? '-' : (trip.serviceCost || 0).toFixed(3);
+      const shopStr = trip.serviceType === 'no_service' ? '-' : (trip.serviceLocation || '');
+      
+      const beforeIssues = trip.condition === 'not_ok' ? Object.entries(trip.checklist || {}).filter(([_, v]) => v).map(([k]) => k).join('; ') : '';
+      const afterIssues = trip.endCondition === 'not_ok' ? Object.entries(trip.endChecklist || {}).filter(([_, v]) => v).map(([k]) => k).join('; ') : '';
+      const issuesStr = [beforeIssues, afterIssues].filter(Boolean).join(' | ');
+
+      const receiptStr = trip.billImage ? 'Attached' : 'No Receipt';
+
+      return [
+        `"${trip.vehicleName}"`,
+        `"${trip.driverName}"`,
+        `"${repDate}"`,
+        `"${reportTime}"`,
+        `"${resDate}"`,
+        `"${resolvedTime}"`,
+        `"${sType}"`,
+        `"${shopStr.replace(/"/g, '""')}"`,
+        `"${costStr}"`,
+        `"${issuesStr.replace(/"/g, '""')}"`,
+        `"${receiptStr}"`
+      ];
+    });
+
+    // Append cost summary info based on current filter applied
+    rows.push([]);
+    rows.push([
+      '"Total Maintenance Cost (OMR)"',
+      '""',
+      '""',
+      '""',
+      '""',
+      '""',
+      '""',
+      '""',
+      `"${totalExpense.toFixed(3)}"`
+    ]);
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(e => e.join(','))
+    ].join('\n');
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', 'maintenance_costs_report.csv');
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const activeTrips = trips.filter(t => t.status === 'active');
-  const serviceRequests = trips.filter(t => t.status === 'waiting_service' || t.serviceNeeded);
+  const serviceRequests = trips.filter(t => t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded));
   const completedTrips = trips.filter(t => t.status === 'completed');
+  const resolvedTrips = trips.filter(t => (t.condition === 'not_ok' || t.endCondition === 'not_ok') && t.resolvedAt !== undefined);
+
+  const filteredCompletedTrips = completedTrips.filter(trip => {
+    if (!trip.startTime) return false;
+    if (historyStartDate) {
+      const startLimit = new Date(historyStartDate);
+      startLimit.setHours(0, 0, 0, 0);
+      if (trip.startTime < startLimit.getTime()) return false;
+    }
+    if (historyEndDate) {
+      const endLimit = new Date(historyEndDate);
+      endLimit.setHours(23, 59, 59, 999);
+      if (trip.startTime > endLimit.getTime()) return false;
+    }
+    return true;
+  });
+
+  const filteredResolvedTrips = resolvedTrips.filter(trip => {
+    if (!trip.resolvedAt) return false;
+    if (costsStartDate) {
+      const startLimit = new Date(costsStartDate);
+      startLimit.setHours(0, 0, 0, 0);
+      if (trip.resolvedAt < startLimit.getTime()) return false;
+    }
+    if (costsEndDate) {
+      const endLimit = new Date(costsEndDate);
+      endLimit.setHours(23, 59, 59, 999);
+      if (trip.resolvedAt > endLimit.getTime()) return false;
+    }
+    if (serviceTypeFilter !== 'all' && trip.serviceType !== serviceTypeFilter) {
+      return false;
+    }
+    return true;
+  });
+
+  const totalExpense = filteredResolvedTrips
+    .filter(t => t.serviceType === 'performed')
+    .reduce((sum, t) => sum + (t.serviceCost || 0), 0);
+
+  const allTimeExpense = resolvedTrips
+    .filter(t => t.serviceType === 'performed')
+    .reduce((sum, t) => sum + (t.serviceCost || 0), 0);
 
 function Pagination({ total, current, onChange, itemsPerPage = 5 }: { total: number, current: number, onChange: (page: number) => void, itemsPerPage?: number }) {
-  const pages = Math.ceil(total / itemsPerPage);
-  if (pages <= 1) return null;
+  const pages = Math.max(1, Math.ceil(total / itemsPerPage));
+  if (total === 0) return null;
   return (
     <div className="flex items-center justify-center gap-2 mt-6">
       <button 
@@ -420,6 +593,204 @@ function IssueDetails({ trip }: { trip: Trip }) {
               )}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TripConditionDetails({ trip }: { trip: Trip }) {
+  const [translatedRemarks, setTranslatedRemarks] = useState<string | null>(null);
+  const [translatedEndRemarks, setTranslatedEndRemarks] = useState<string | null>(null);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [isTranslatingEnd, setIsTranslatingEnd] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [errorEnd, setErrorEnd] = useState<string | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [showingTranslation, setShowingTranslation] = useState(false);
+  const [showingTranslationEnd, setShowingTranslationEnd] = useState(false);
+
+  const beforeChecklist = Object.entries(trip.checklist || {})
+    .filter(([_, value]) => value)
+    .map(([key]) => key);
+
+  const afterChecklist = Object.entries(trip.endChecklist || {})
+    .filter(([_, value]) => value)
+    .map(([key]) => key);
+
+  const hasBeforeIssue = trip.condition === 'not_ok' && (beforeChecklist.length > 0 || trip.remarks);
+  const hasAfterIssue = trip.endCondition === 'not_ok' && (afterChecklist.length > 0 || trip.endRemarks);
+
+  if (!hasBeforeIssue && !hasAfterIssue) {
+    return (
+      <div className="text-slate-500 font-semibold text-xs bg-slate-50 p-2.5 rounded-lg border border-slate-200">
+        No issues reported before or after trip.
+      </div>
+    );
+  }
+
+  const handleTranslateToggleBefore = async () => {
+    if (translatedRemarks) {
+      setShowingTranslation(!showingTranslation);
+      return;
+    }
+    if (!trip.remarks) return;
+    setIsTranslating(true);
+    setError(null);
+    try {
+      const detectArabic = /[^\x00-\x7F]/.test(trip.remarks);
+      const langpair = detectArabic ? 'ar|en' : 'en|ar';
+      const myMemoryRes = await fetch(
+        `https://api.mymemory.translated.net/get?q=${encodeURIComponent(trip.remarks)}&langpair=${langpair}`
+      );
+      if (myMemoryRes.ok) {
+        const myMemoryData = await myMemoryRes.json();
+        const text = myMemoryData?.responseData?.translatedText;
+        if (text) {
+          setTranslatedRemarks(text);
+          setShowingTranslation(true);
+        }
+      } else {
+        throw new Error('Translation failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to translate');
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  const handleTranslateToggleAfter = async () => {
+    if (translatedEndRemarks) {
+      setShowingTranslationEnd(!showingTranslationEnd);
+      return;
+    }
+    if (!trip.endRemarks) return;
+    setIsTranslatingEnd(true);
+    setErrorEnd(null);
+    try {
+      const detectArabic = /[^\x00-\x7F]/.test(trip.endRemarks);
+      const langpair = detectArabic ? 'ar|en' : 'en|ar';
+      const myMemoryRes = await fetch(
+        `https://api.mymemory.translated.net/get?q=${encodeURIComponent(trip.endRemarks)}&langpair=${langpair}`
+      );
+      if (myMemoryRes.ok) {
+        const myMemoryData = await myMemoryRes.json();
+        const text = myMemoryData?.responseData?.translatedText;
+        if (text) {
+          setTranslatedEndRemarks(text);
+          setShowingTranslationEnd(true);
+        }
+      } else {
+        throw new Error('Translation failed');
+      }
+    } catch (err: any) {
+      setErrorEnd(err.message || 'Failed to translate');
+    } finally {
+      setIsTranslatingEnd(false);
+    }
+  };
+
+  const needsTranslationBefore = trip.remarks && /[^\x00-\x7F]/.test(trip.remarks);
+  const needsTranslationAfter = trip.endRemarks && /[^\x00-\x7F]/.test(trip.endRemarks);
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 shadow-sm w-full overflow-hidden transition-all duration-300">
+      <button 
+        type="button"
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-slate-50 transition-colors text-xs font-semibold text-slate-700"
+      >
+        <span className="flex items-center gap-1.5">
+          <Clock className="w-3.5 h-3.5 text-slate-500" />
+          View Checkup Details
+        </span>
+        {isExpanded ? (
+          <ChevronUp className="w-4 h-4 text-slate-400" />
+        ) : (
+          <ChevronDown className="w-4 h-4 text-slate-400" />
+        )}
+      </button>
+
+      {isExpanded && (
+        <div className="px-4 pb-4 pt-2 border-t border-slate-100 text-xs space-y-4">
+          <div className="bg-slate-50/50 p-3 rounded-lg border border-slate-100">
+            <span className="font-bold text-slate-800 block mb-1">Pre-Trip Check:</span>
+            {!hasBeforeIssue ? (
+              <span className="text-green-600 font-semibold">All Good</span>
+            ) : (
+              <div className="mt-1.5 space-y-2">
+                {beforeChecklist.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-slate-600">Failed Checks:</span>
+                    <span className="text-slate-650 ml-1">{beforeChecklist.join(', ')}</span>
+                  </div>
+                )}
+                {trip.remarks && (
+                  <div className="bg-white p-2 rounded border border-slate-150 mt-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1">
+                        <span className="font-semibold text-slate-700">Remarks: </span>
+                        <span className="text-slate-600">
+                          {showingTranslation && translatedRemarks ? translatedRemarks : trip.remarks}
+                        </span>
+                      </div>
+                      {needsTranslationBefore && (
+                        <button
+                          type="button"
+                          onClick={handleTranslateToggleBefore}
+                          disabled={isTranslating}
+                          className="text-[10px] font-bold bg-slate-900 text-white px-2 py-0.5 rounded hover:bg-slate-800 transition-colors whitespace-nowrap"
+                        >
+                          {isTranslating ? '...' : (showingTranslation ? 'Orig' : 'Trans')}
+                        </button>
+                      )}
+                    </div>
+                    {error && <p className="text-[10px] text-red-650 mt-1">{error}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-50/50 p-3 rounded-lg border border-slate-100">
+            <span className="font-bold text-slate-800 block mb-1">Post-Trip Check:</span>
+            {!hasAfterIssue ? (
+              <span className="text-green-600 font-semibold">All Good</span>
+            ) : (
+              <div className="mt-1.5 space-y-2">
+                {afterChecklist.length > 0 && (
+                  <div>
+                    <span className="font-semibold text-slate-600">Failed Checks:</span>
+                    <span className="text-slate-650 ml-1">{afterChecklist.join(', ')}</span>
+                  </div>
+                )}
+                {trip.endRemarks && (
+                  <div className="bg-white p-2 rounded border border-slate-150 mt-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1">
+                        <span className="font-semibold text-slate-700">Remarks: </span>
+                        <span className="text-slate-600">
+                          {showingTranslationEnd && translatedEndRemarks ? translatedEndRemarks : trip.endRemarks}
+                        </span>
+                      </div>
+                      {needsTranslationAfter && (
+                        <button
+                          type="button"
+                          onClick={handleTranslateToggleAfter}
+                          disabled={isTranslatingEnd}
+                          className="text-[10px] font-bold bg-slate-900 text-white px-2 py-0.5 rounded hover:bg-slate-800 transition-colors whitespace-nowrap"
+                        >
+                          {isTranslatingEnd ? '...' : (showingTranslationEnd ? 'Orig' : 'Trans')}
+                        </button>
+                      )}
+                    </div>
+                    {errorEnd && <p className="text-[10px] text-red-650 mt-1">{errorEnd}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -855,73 +1226,260 @@ function IssueDetails({ trip }: { trip: Trip }) {
 
 
         {activeTab === 'service_requests' && (() => {
-          const filteredServiceRequests = driverFilter 
-            ? serviceRequests.filter(t => t.driverId === driverFilter)
-            : serviceRequests;
-          const paginatedServiceRequests = filteredServiceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE);
-          
           return (
-          <div className="bg-white p-6 rounded-2xl shadow-sm border-2 border-red-100 relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-1 h-full bg-red-500"></div>
-            {driverFilter && (
-              <div className="mb-4 bg-orange-50 border border-orange-100 p-4 rounded-xl flex items-center justify-between text-sm text-orange-800 font-medium">
-                <span>
-                  Showing pending service requests for <strong>{drivers.find(dr => dr.id === driverFilter)?.name || 'selected driver'}</strong>
-                </span>
+            <div className="space-y-6">
+              {/* Sub-tab navigation */}
+              <div className="flex bg-slate-100 p-1 rounded-xl w-full md:w-fit gap-2">
                 <button
-                  onClick={() => setDriverFilter('')}
-                  className="text-xs bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                  type="button"
+                  onClick={() => setServiceRequestsTab('pending')}
+                  className={`px-4 py-2.5 text-xs font-bold rounded-lg transition-all ${serviceRequestsTab === 'pending' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
                 >
-                  Show All
+                  Pending Requests ({serviceRequests.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setServiceRequestsTab('resolved')}
+                  className={`px-4 py-2.5 text-xs font-bold rounded-lg transition-all ${serviceRequestsTab === 'resolved' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-950'}`}
+                >
+                  Resolved Costs Log ({filteredResolvedTrips.length})
                 </button>
               </div>
-            )}
-            <h2 className="text-xl font-semibold mb-5 flex items-center gap-2 text-slate-800">
-              <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
-                <Wrench className="w-4 h-4 text-red-600" />
-              </div>
-              Service Requests ({filteredServiceRequests.length})
-            </h2>
-            {filteredServiceRequests.length === 0 ? (
-              <div className="text-center py-8 bg-slate-50 rounded-xl border border-slate-100 border-dashed">
-                <p className="text-slate-500 font-medium">No active service requests.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {paginatedServiceRequests.map(trip => (
-                  <div key={trip.id} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col md:flex-row md:items-start justify-between gap-5 relative overflow-hidden">
-                    <div className="absolute top-0 left-0 w-1 h-full bg-orange-500"></div>
-                    <div className="flex-1 pl-2">
-                      <div className="flex items-center gap-3 mb-1">
-                        <p className="font-bold text-lg text-slate-900">{trip.driverName}</p>
-                        <span className="text-slate-400 text-sm font-medium">reported an issue with</span>
-                        <p className="font-bold text-lg text-slate-900">{trip.vehicleName}</p>
-                        {trip.status === 'active' && (
-                          <span className="ml-2 text-xs font-bold text-slate-900 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md uppercase tracking-wide">
-                            Currently Driving
-                          </span>
+
+              {serviceRequestsTab === 'pending' ? (() => {
+                const filteredServiceRequests = driverFilter 
+                  ? serviceRequests.filter(t => t.driverId === driverFilter)
+                  : serviceRequests;
+                const paginatedServiceRequests = filteredServiceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE);
+                
+                return (
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border-2 border-red-100 relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-red-500"></div>
+                    {driverFilter && (
+                      <div className="mb-4 bg-orange-50 border border-orange-100 p-4 rounded-xl flex items-center justify-between text-sm text-orange-800 font-medium">
+                        <span>
+                          Showing pending service requests for <strong>{drivers.find(dr => dr.id === driverFilter)?.name || 'selected driver'}</strong>
+                        </span>
+                        <button
+                          onClick={() => setDriverFilter('')}
+                          className="text-xs bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                        >
+                          Show All
+                        </button>
+                      </div>
+                    )}
+                    <h2 className="text-xl font-semibold mb-5 flex items-center gap-2 text-slate-800">
+                      <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
+                        <Wrench className="w-4 h-4 text-red-600" />
+                      </div>
+                      Pending Service Requests ({filteredServiceRequests.length})
+                    </h2>
+                    {filteredServiceRequests.length === 0 ? (
+                      <div className="text-center py-8 bg-slate-50 rounded-xl border border-slate-100 border-dashed">
+                        <p className="text-slate-500 font-medium">No active service requests.</p>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        {paginatedServiceRequests.map(trip => (
+                          <div key={trip.id} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col md:flex-row md:items-start justify-between gap-5 relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-1 h-full bg-orange-500"></div>
+                            <div className="flex-1 pl-2">
+                              <div className="flex items-center gap-3 mb-1 flex-wrap">
+                                <p className="font-bold text-lg text-slate-900">{trip.driverName}</p>
+                                <span className="text-slate-400 text-sm font-medium">reported an issue with</span>
+                                <p className="font-bold text-lg text-slate-900">{trip.vehicleName}</p>
+                                {trip.status === 'active' && (
+                                  <span className="ml-2 text-xs font-bold text-slate-900 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md uppercase tracking-wide">
+                                    Currently Driving
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs font-medium text-slate-500 mb-2">
+                                <Clock className="w-3 h-3 inline mr-1" /> Reported at {trip.startTime ? formatTime(trip.startTime) : 'Unknown'}
+                              </p>
+                              <div className="flex gap-4 text-xs font-medium text-slate-500 my-2">
+                                <div>Pre-Trip Check: {trip.condition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
+                                {trip.endCondition && (
+                                  <div>Post-Trip Check: {trip.endCondition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
+                                )}
+                              </div>
+                              <TripConditionDetails trip={trip} />
+                            </div>
+                            <div>
+                              <button 
+                                onClick={() => confirmResolve(trip.id, trip.status)}
+                                className="w-full md:w-auto bg-slate-900 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap flex items-center justify-center gap-2 active:scale-95"
+                              >
+                                <CheckCircle2 className="w-4 h-4" />
+                                Mark Resolved
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <Pagination total={filteredServiceRequests.length} current={serviceRequestsPage} onChange={setServiceRequestsPage} />
+                  </div>
+                );
+              })() : (() => {
+                const paginatedResolved = filteredResolvedTrips.slice((resolvedCostsPage - 1) * ITEMS_PER_PAGE, resolvedCostsPage * ITEMS_PER_PAGE);
+                
+                return (
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-5 gap-4">
+                      <h2 className="text-xl font-semibold text-slate-800">Resolved Requests & Maintenance Costs ({filteredResolvedTrips.length})</h2>
+                      {filteredResolvedTrips.length > 0 && (
+                        <button
+                          onClick={downloadCostsAsCSV}
+                          className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-medium transition-colors shadow-sm whitespace-nowrap text-sm"
+                        >
+                          <Download className="w-4 h-4" /> Export Costs Report
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Date & Type Filters */}
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6 text-sm">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-700 font-medium">Start Date:</span>
+                          <input
+                            type="date"
+                            value={costsStartDate}
+                            onChange={e => {
+                              setCostsStartDate(e.target.value);
+                              setResolvedCostsPage(1);
+                            }}
+                            className="border border-slate-250 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-slate-900 outline-none text-slate-800 text-xs"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-700 font-medium">End Date:</span>
+                          <input
+                            type="date"
+                            value={costsEndDate}
+                            onChange={e => {
+                              setCostsEndDate(e.target.value);
+                              setResolvedCostsPage(1);
+                            }}
+                            className="border border-slate-250 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-slate-900 outline-none text-slate-800 text-xs"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-slate-700 font-medium">Service Type:</span>
+                          <select
+                            value={serviceTypeFilter}
+                            onChange={e => {
+                              setServiceTypeFilter(e.target.value as any);
+                              setResolvedCostsPage(1);
+                            }}
+                            className="border border-slate-250 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-slate-900 outline-none text-slate-800 text-xs bg-white"
+                          >
+                            <option value="all">All Resolutions</option>
+                            <option value="performed">Service Performed</option>
+                            <option value="no_service">Solved Without Service</option>
+                          </select>
+                        </div>
+                        {(costsStartDate || costsEndDate || serviceTypeFilter !== 'all') && (
+                          <button
+                            onClick={() => {
+                              setCostsStartDate('');
+                              setCostsEndDate('');
+                              setServiceTypeFilter('all');
+                              setResolvedCostsPage(1);
+                            }}
+                            className="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                          >
+                            Clear Filters
+                          </button>
                         )}
                       </div>
-                      <p className="text-xs font-medium text-slate-500 mb-2">
-                        <Clock className="w-3 h-3 inline mr-1" /> Reported at {trip.startTime ? formatTime(trip.startTime) : 'Unknown'}
-                      </p>
-                      <IssueDetails trip={trip} />
+                      
+                      {/* Expenses Summary Banner */}
+                      <div className="bg-slate-900 text-white px-4 py-2.5 rounded-xl flex items-center gap-3 shadow-sm font-bold text-xs">
+                        <span>Maintenance Cost Summary:</span>
+                        <div className="flex flex-col lg:flex-row lg:items-center gap-1.5 text-right lg:text-left">
+                          {(costsStartDate || costsEndDate) ? (
+                            <>
+                              <span className="text-green-400">Range: OMR {totalExpense.toFixed(3)}</span>
+                              <span className="text-slate-400 hidden lg:inline">|</span>
+                              <span className="text-slate-300">All-Time: OMR {allTimeExpense.toFixed(3)}</span>
+                            </>
+                          ) : (
+                            <span className="text-green-400">OMR {allTimeExpense.toFixed(3)}</span>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <button 
-                        onClick={() => confirmResolve(trip.id, trip.status)}
-                        className="w-full md:w-auto bg-slate-900 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap flex items-center justify-center gap-2 active:scale-95"
-                      >
-                        <CheckCircle2 className="w-4 h-4" />
-                        Mark Resolved
-                      </button>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead>
+                          <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                            <th className="pb-3 font-semibold px-2">Vehicle & Driver</th>
+                            <th className="pb-3 font-semibold px-2">Resolved Date</th>
+                            <th className="pb-3 font-semibold px-2">Resolved Time</th>
+                            <th className="pb-3 font-semibold px-2">Service Type</th>
+                            <th className="pb-3 font-semibold px-2">Shop / Dealer</th>
+                            <th className="pb-3 font-semibold px-2">Cost (OMR)</th>
+                            <th className="pb-3 font-semibold px-2">Receipt</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {paginatedResolved.map(trip => (
+                            <tr key={trip.id} className="text-slate-800 align-middle hover:bg-slate-50 transition-colors">
+                              <td className="py-4 px-2">
+                                <div className="font-semibold text-slate-900">{trip.vehicleName}</div>
+                                <div className="text-xs text-slate-500 font-medium mt-0.5">Reported by {trip.driverName}</div>
+                              </td>
+                              <td className="py-4 px-2 text-slate-700 font-semibold whitespace-nowrap">
+                                {trip.resolvedAt ? new Date(trip.resolvedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '-'}
+                              </td>
+                              <td className="py-4 px-2 text-slate-600 font-medium">
+                                {trip.resolvedAt ? formatTime(trip.resolvedAt) : '-'}
+                              </td>
+                              <td className="py-4 px-2 font-medium">
+                                {trip.serviceType === 'no_service' ? (
+                                  <span className="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded">No Service Needed</span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded">Service Performed</span>
+                                )}
+                              </td>
+                              <td className="py-4 px-2 text-slate-700 font-semibold">
+                                {trip.serviceType === 'no_service' ? '-' : (trip.serviceLocation || '-')}
+                              </td>
+                              <td className="py-4 px-2 font-bold text-slate-900">
+                                {trip.serviceType === 'no_service' ? '-' : `OMR ${(trip.serviceCost || 0).toFixed(3)}`}
+                              </td>
+                              <td className="py-4 px-2">
+                                {trip.billImage ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewImageUrl(trip.billImage!)}
+                                    className="p-1 hover:bg-slate-100 rounded-lg transition-colors border border-slate-100 inline-block overflow-hidden"
+                                    title="Click to view receipt"
+                                  >
+                                    <img src={trip.billImage} alt="Receipt Thumbnail" className="h-8 w-8 object-cover rounded-md" />
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-slate-400 italic">No receipt</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                          {filteredResolvedTrips.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="py-12 text-center text-slate-500 font-medium">No resolved costs log matching selected filters.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
                     </div>
+                    <Pagination total={filteredResolvedTrips.length} current={resolvedCostsPage} onChange={setResolvedCostsPage} />
                   </div>
-                ))}
-              </div>
-            )}
-            <Pagination total={filteredServiceRequests.length} current={serviceRequestsPage} onChange={setServiceRequestsPage} />
-          </div>
+                );
+              })()}
+            </div>
           );
         })()}
 
@@ -984,12 +1542,12 @@ function IssueDetails({ trip }: { trip: Trip }) {
         })()}
 
         {activeTab === 'history' && (() => {
-          const paginatedHistory = completedTrips.slice((historyPage - 1) * ITEMS_PER_PAGE, historyPage * ITEMS_PER_PAGE);
+          const paginatedHistory = filteredCompletedTrips.slice((historyPage - 1) * ITEMS_PER_PAGE, historyPage * ITEMS_PER_PAGE);
           return (
           <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-5 gap-4">
-              <h2 className="text-xl font-semibold text-slate-800">Trip History</h2>
-              {completedTrips.length > 0 && (
+              <h2 className="text-xl font-semibold text-slate-800">Trip History ({filteredCompletedTrips.length})</h2>
+              {filteredCompletedTrips.length > 0 && (
                 <button
                   onClick={downloadHistoryAsCSV}
                   className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-medium transition-colors shadow-sm whitespace-nowrap text-sm"
@@ -998,22 +1556,67 @@ function IssueDetails({ trip }: { trip: Trip }) {
                 </button>
               )}
             </div>
+
+            {/* Date Filters */}
+            <div className="flex flex-wrap items-center gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-slate-700 font-medium">Start Date:</span>
+                <input
+                  type="date"
+                  value={historyStartDate}
+                  onChange={e => {
+                    setHistoryStartDate(e.target.value);
+                    setHistoryPage(1);
+                  }}
+                  className="border border-slate-250 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-slate-900 outline-none text-slate-800 text-xs"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-slate-700 font-medium">End Date:</span>
+                <input
+                  type="date"
+                  value={historyEndDate}
+                  onChange={e => {
+                    setHistoryEndDate(e.target.value);
+                    setHistoryPage(1);
+                  }}
+                  className="border border-slate-250 rounded-lg px-3 py-1.5 focus:ring-2 focus:ring-slate-900 outline-none text-slate-800 text-xs"
+                />
+              </div>
+              {(historyStartDate || historyEndDate) && (
+                <button
+                  onClick={() => {
+                    setHistoryStartDate('');
+                    setHistoryEndDate('');
+                    setHistoryPage(1);
+                  }}
+                  className="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                >
+                  Clear Filters
+                </button>
+              )}
+            </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
                     <th className="pb-3 font-semibold px-2">Driver & Vehicle</th>
+                    <th className="pb-3 font-semibold px-2">Date</th>
                     <th className="pb-3 font-semibold px-2">Timing</th>
                     <th className="pb-3 font-semibold px-2">Duration</th>
-                    <th className="pb-3 font-semibold px-2">Condition & Service</th>
+                    <th className="pb-3 font-semibold px-2">Condition Checks & Service</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {paginatedHistory.map(trip => (
                     <tr key={trip.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
-                      <td className="py-4 px-2">
+                       <td className="py-4 px-2">
                         <div className="font-semibold text-slate-900">{trip.driverName}</div>
                         <div className="text-xs text-slate-500 font-medium mt-0.5">{trip.vehicleName}</div>
+                      </td>
+                      <td className="py-4 px-2 font-semibold text-slate-700 whitespace-nowrap">
+                        {trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '-'}
                       </td>
                       <td className="py-4 px-2">
                         <div className="text-slate-600 font-medium">{trip.startTime ? formatTime(trip.startTime) : '-'} <span className="text-slate-300 mx-1">→</span> {trip.endTime ? formatTime(trip.endTime) : '-'}</div>
@@ -1022,32 +1625,51 @@ function IssueDetails({ trip }: { trip: Trip }) {
                         {trip.duration ? formatDuration(trip.duration) : '-'}
                       </td>
                       <td className="py-4 px-2">
-                         <div className="flex flex-col gap-2 items-start">
-                            {trip.serviceNeeded && (
-                              <span className="text-xs font-semibold text-red-700 bg-red-50 border border-red-200 px-2.5 py-1 rounded-md">Service Required</span>
-                            )}
-                            {trip.condition === 'not_ok' && !trip.serviceNeeded && (
-                              <span className="text-xs font-semibold text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md">Issues Resolved</span>
-                            )}
-                            {trip.condition === 'ok' && !trip.serviceNeeded && (
-                              <span className="text-xs font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-md">All Good</span>
+                         <div className="flex flex-wrap gap-2 items-center mb-3">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[10px] uppercase font-bold text-slate-400">Pre-Trip:</span>
+                              {trip.condition === 'ok' ? (
+                                <span className="text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded">All Good</span>
+                              ) : (
+                                <span className="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded">Issues</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 ml-2">
+                              <span className="text-[10px] uppercase font-bold text-slate-400">Post-Trip:</span>
+                              {trip.endCondition === 'ok' ? (
+                                <span className="text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded">All Good</span>
+                              ) : (
+                                trip.endCondition === 'not_ok' ? (
+                                  <span className="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded">Issues</span>
+                                ) : (
+                                  <span className="text-[10px] font-bold text-slate-550 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded">-</span>
+                                )
+                              )}
+                            </div>
+                            
+                            {(trip.serviceNeeded || trip.endServiceNeeded) ? (
+                              <span className="text-[10px] font-bold text-orange-700 bg-orange-50 border border-orange-200 px-2 py-0.5 rounded ml-auto">Needs Service</span>
+                            ) : (
+                              (trip.condition === 'not_ok' || trip.endCondition === 'not_ok') && (
+                                <span className="text-[10px] font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded ml-auto">Resolved</span>
+                              )
                             )}
                          </div>
-                         <div className="mt-3 w-full min-w-[280px]">
-                           <IssueDetails trip={trip} />
+                         <div className="w-full min-w-[280px]">
+                           <TripConditionDetails trip={trip} />
                          </div>
                       </td>
                     </tr>
                   ))}
-                  {completedTrips.length === 0 && (
+                  {filteredCompletedTrips.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="py-12 text-center text-slate-500 font-medium">No completed trips yet.</td>
+                      <td colSpan={4} className="py-12 text-center text-slate-500 font-medium">No trips matched the selected date filter.</td>
                     </tr>
                   )}
                 </tbody>
               </table>
             </div>
-            <Pagination total={completedTrips.length} current={historyPage} onChange={setHistoryPage} />
+            <Pagination total={filteredCompletedTrips.length} current={historyPage} onChange={setHistoryPage} />
           </div>
           );
         })()}
@@ -1055,27 +1677,135 @@ function IssueDetails({ trip }: { trip: Trip }) {
 
       {resolvingTripId && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl p-6 shadow-xl w-full max-w-sm border border-slate-100">
-            <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mb-4 mx-auto">
-              <CheckCircle2 className="w-6 h-6 text-blue-600" />
+          <div className="bg-white rounded-2xl p-6 shadow-xl w-full max-w-md border border-slate-100 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-xl font-bold text-slate-900 text-center mb-4">Resolve Service Request</h3>
+            
+            <div className="space-y-4">
+              {/* Service Type options */}
+              <div className="space-y-2">
+                <label className="block text-sm font-semibold text-slate-700">Resolution Type</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setServiceType('performed')}
+                    className={`py-2.5 px-4 rounded-xl border text-sm font-medium transition-all ${serviceType === 'performed' ? 'border-slate-900 bg-slate-50 text-slate-900 font-bold ring-1 ring-slate-900' : 'border-slate-200 text-slate-650 hover:bg-slate-50 bg-white'}`}
+                  >
+                    Service Performed
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setServiceType('no_service')}
+                    className={`py-2.5 px-4 rounded-xl border text-sm font-medium transition-all ${serviceType === 'no_service' ? 'border-slate-900 bg-slate-50 text-slate-900 font-bold ring-1 ring-slate-900' : 'border-slate-200 text-slate-650 hover:bg-slate-50 bg-white'}`}
+                  >
+                    Solved Without Service
+                  </button>
+                </div>
+              </div>
+
+              {serviceType === 'performed' && (
+                <>
+                  {/* Shop / Dealer */}
+                  <div className="space-y-1">
+                    <label className="block text-sm font-semibold text-slate-700">Shop / Dealer Name <span className="text-red-500">*</span></label>
+                    <input
+                      type="text"
+                      value={serviceLocationInput}
+                      onChange={e => setServiceLocationInput(e.target.value)}
+                      placeholder="Enter dealer or workshop name..."
+                      className="w-full border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800 text-sm"
+                      required
+                    />
+                  </div>
+
+                  {/* Cost */}
+                  <div className="space-y-1">
+                    <label className="block text-sm font-semibold text-slate-700">Service Cost (OMR) <span className="text-red-500">*</span></label>
+                    <input
+                      type="number"
+                      step="0.001"
+                      min="0"
+                      value={serviceCostInput}
+                      onChange={e => setServiceCostInput(e.target.value)}
+                      placeholder="Enter total cost..."
+                      className="w-full border border-slate-200 rounded-xl px-4 py-2.5 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800 text-sm"
+                      required
+                    />
+                  </div>
+
+                  {/* Receipt Upload */}
+                  <div className="space-y-1">
+                    <label className="block text-sm font-semibold text-slate-700">Attach Bill / Receipt Image</label>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            setBillImageBase64(reader.result as string);
+                          };
+                          reader.readAsDataURL(file);
+                        }
+                      }}
+                      className="w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer"
+                    />
+                    {billImageBase64 && (
+                      <div className="mt-2 relative inline-block">
+                        <img src={billImageBase64} alt="Bill Preview" className="h-16 rounded border border-slate-200 object-cover" />
+                        <button
+                          type="button"
+                          onClick={() => setBillImageBase64('')}
+                          className="absolute -top-1.5 -right-1.5 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600 transition-colors"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
             </div>
-            <h3 className="text-xl font-bold text-slate-900 text-center mb-2">Resolve Issue?</h3>
-            <p className="text-slate-500 text-center text-sm mb-6">
-              Are you sure you want to mark this service request as resolved? This action cannot be undone.
-            </p>
-            <div className="flex gap-3">
+
+            <div className="flex gap-3 mt-6">
               <button 
-                onClick={() => { setResolvingTripId(null); setResolvingTripStatus(null); }}
+                onClick={() => {
+                  setResolvingTripId(null);
+                  setResolvingTripStatus(null);
+                  setServiceType('performed');
+                  setServiceCostInput('');
+                  setServiceLocationInput('');
+                  setBillImageBase64('');
+                }}
                 className="flex-1 py-3 px-4 rounded-xl font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors"
               >
                 Cancel
               </button>
               <button 
                 onClick={handleConfirmResolve}
-                className="flex-1 py-3 px-4 rounded-xl font-medium text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-sm"
+                disabled={serviceType === 'performed' && (!serviceLocationInput.trim() || !serviceCostInput)}
+                className="flex-1 py-3 px-4 rounded-xl font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-50 active:scale-95"
               >
-                Confirm
+                Resolve
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {previewImageUrl && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl p-4 shadow-2xl w-full max-w-lg border border-slate-100 relative">
+            <button
+              onClick={() => setPreviewImageUrl(null)}
+              className="absolute top-3 right-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-full p-2 transition-colors z-10 active:scale-95"
+              title="Close Preview"
+            >
+              <X className="w-4 h-4" />
+            </button>
+            <div className="text-center font-bold text-slate-800 mb-3 text-sm">Receipt Preview</div>
+            <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50 flex items-center justify-center min-h-[200px] max-h-[70vh]">
+              <img src={previewImageUrl} alt="Full Receipt View" className="max-w-full max-h-[65vh] object-contain animate-fadeIn" />
             </div>
           </div>
         </div>
