@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { db } from '../firebase';
 import { collection, onSnapshot, query, addDoc, updateDoc, doc } from 'firebase/firestore';
 import { Driver, Vehicle, Trip } from '../types';
-import { ShieldCheck, AlertCircle, Wrench, Play, Square, Truck, Route, Clock, CheckCircle2, Check, ArrowLeft, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, AlertCircle, Wrench, Play, Square, Truck, Route, Clock, CheckCircle2, Check, ArrowLeft, AlertTriangle, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatDuration } from '../utils';
+import translations from '../translation.json';
 
 const CHECKLIST_ITEMS = [
   "Tires", "Lights", "Brakes", "Horn", "Mirrors", 
@@ -17,6 +18,22 @@ const CHECKLIST_ITEMS = [
 export default function DriverPanel() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  
+  const [language, setLanguage] = useState<'en' | 'ar'>(() => {
+    return (localStorage.getItem('fleetflow_driver_lang') as 'en' | 'ar') || 'en';
+  });
+  const [langMenuOpen, setLangMenuOpen] = useState(false);
+
+  const t = (key: string, replacements?: Record<string, string | number>): string => {
+    const langDict = (translations as any)[language] || (translations as any)['en'];
+    const text = langDict[key] || (translations as any)['en'][key] || key;
+    if (!replacements) return text;
+    let result = text;
+    for (const [k, v] of Object.entries(replacements)) {
+      result = result.replace(`{${k}}`, String(v));
+    }
+    return result;
+  };
   
   const [selectedDriverId, setSelectedDriverId] = useState(() => {
     return localStorage.getItem('fleetflow_driver_id') || '';
@@ -43,8 +60,8 @@ export default function DriverPanel() {
     return () => clearInterval(timer);
   }, []);
 
-  const formattedTime = currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const formattedDate = currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+  const formattedTime = currentTime.toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const formattedDate = currentTime.toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 
   // Cleanup session if the driver was deleted from database
   useEffect(() => {
@@ -348,7 +365,7 @@ export default function DriverPanel() {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-100">
           <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
-          Active
+          {t('statusActive')}
         </span>
       );
     }
@@ -356,7 +373,7 @@ export default function DriverPanel() {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold text-orange-700 bg-orange-50 border border-orange-100 animate-pulse">
           <Wrench className="w-3 h-3" />
-          Service Pending
+          {t('statusServicePending')}
         </span>
       );
     }
@@ -364,31 +381,31 @@ export default function DriverPanel() {
       return (
         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold text-green-700 bg-green-50 border border-green-200">
           <CheckCircle2 className="w-3 h-3" />
-          Maintenance Completed
+          {t('statusMaintenanceCompleted')}
         </span>
       );
     }
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold text-slate-500 bg-slate-50 border border-slate-100">
         <Check className="w-3 h-3" />
-        Completed
+        {t('statusCompleted')}
       </span>
     );
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="min-h-screen bg-slate-50 flex flex-col" dir={language === 'ar' ? 'rtl' : 'ltr'}>
       {/* Top Header Bar (Full width, no rounded corners) */}
       <header className="bg-slate-900 text-white shadow-md">
         <div className="max-w-7xl mx-auto px-4 py-4 md:py-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <Truck className="w-8 h-8 text-blue-400 font-bold" />
             <div>
-              <h1 className="text-xl font-bold tracking-tight">FleetFlow</h1>
-              <p className="text-xs text-slate-400">Driver Terminal</p>
+              <h1 className="text-xl font-bold tracking-tight">{t('title')}</h1>
+              <p className="text-xs text-slate-400">{t('driverTerminal')}</p>
             </div>
           </div>
-          <div className="text-right text-xs md:text-sm font-semibold text-slate-400">
+          <div className="text-end text-xs md:text-sm font-semibold text-slate-400">
             <div>{formattedDate}</div>
             <div className="font-mono mt-0.5">{formattedTime}</div>
           </div>
@@ -398,24 +415,60 @@ export default function DriverPanel() {
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 space-y-6">
         {/* Persistent Tab Navigation (Shown on all pages) */}
-        <div className="flex bg-slate-200/60 p-1 rounded-xl w-full md:w-fit gap-2">
+        <div className="flex flex-wrap bg-slate-200/60 p-1 rounded-xl w-full md:w-fit gap-2 items-center relative">
           <button
             type="button"
             onClick={() => setActiveSubTab('terminal')}
             className={`px-6 py-2.5 rounded-lg text-sm font-semibold transition-all ${activeSubTab === 'terminal' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
           >
-            {step === 'driving' ? 'Active Trip' : (step === 'setup' ? 'Start Trip' : 'Trip Setup')}
+            {step === 'driving' ? t('activeTrip') : (step === 'setup' ? t('startTrip') : t('tripSetup'))}
           </button>
           <button
             type="button"
             onClick={() => setActiveSubTab('history')}
             className={`px-6 py-2.5 rounded-lg text-sm font-semibold transition-all relative ${activeSubTab === 'history' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-900'}`}
           >
-            My History
+            {t('myHistory')}
             {selectedDriverId && myTrips.some(t => t.status === 'waiting_service' || t.serviceNeeded) && (
               <span className="absolute top-1.5 right-2 w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>
             )}
           </button>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setLangMenuOpen(!langMenuOpen)}
+              className="px-6 py-2.5 rounded-lg text-sm font-semibold transition-all text-slate-500 hover:text-slate-900 flex items-center gap-1.5"
+            >
+              <span>{language === 'en' ? 'English' : 'العربية'}</span>
+              <ChevronDown className="w-4 h-4" />
+            </button>
+            {langMenuOpen && (
+              <div className="absolute end-0 mt-2 w-40 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLanguage('en');
+                    localStorage.setItem('fleetflow_driver_lang', 'en');
+                    setLangMenuOpen(false);
+                  }}
+                  className={`w-full text-start px-4 py-2 text-sm hover:bg-slate-50 transition-colors font-medium ${language === 'en' ? 'text-blue-600 bg-blue-50/50' : 'text-slate-700'}`}
+                >
+                  English
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLanguage('ar');
+                    localStorage.setItem('fleetflow_driver_lang', 'ar');
+                    setLangMenuOpen(false);
+                  }}
+                  className={`w-full text-start px-4 py-2 text-sm hover:bg-slate-50 transition-colors font-medium ${language === 'ar' ? 'text-blue-600 bg-blue-50/50' : 'text-slate-700'}`}
+                >
+                  العربية (Arabic)
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {activeSubTab === 'terminal' ? (
@@ -428,7 +481,7 @@ export default function DriverPanel() {
                 className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors mb-4 group active:scale-95"
               >
                 <ArrowLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
-                Back
+                {t('back')}
               </button>
             )}
 
@@ -445,8 +498,8 @@ export default function DriverPanel() {
                   {selectedDriverId && savedDriver ? (
                     <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 flex items-center justify-between">
                       <div>
-                        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block font-medium">Driver</span>
-                        <span className="text-lg font-bold text-slate-800">Hi, {savedDriver.name}!</span>
+                        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block font-medium">{t('driver')}</span>
+                        <span className="text-lg font-bold text-slate-800">{t('welcomeDriver', { name: savedDriver.name })}</span>
                       </div>
                       <button 
                         type="button"
@@ -456,18 +509,18 @@ export default function DriverPanel() {
                         }}
                         className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
                       >
-                        Change Driver
+                        {t('changeDriver')}
                       </button>
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      <label className="block text-sm font-medium text-slate-700">Select Driver</label>
+                      <label className="block text-sm font-medium text-slate-700">{t('selectDriver')}</label>
                       <select 
                         value={selectedDriverId} 
                         onChange={e => setSelectedDriverId(e.target.value)}
                         className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800"
                       >
-                        <option value="" disabled>Choose your name</option>
+                        <option value="" disabled>{t('chooseName')}</option>
                         {drivers.map(d => (
                           <option key={d.id} value={d.id}>{d.name}</option>
                         ))}
@@ -477,13 +530,13 @@ export default function DriverPanel() {
 
                   {/* Select Vehicle */}
                   <div className="space-y-2">
-                    <label className="block text-sm font-medium text-slate-700">Select Vehicle</label>
+                    <label className="block text-sm font-medium text-slate-700">{t('selectVehicle')}</label>
                     <select 
                       value={selectedVehicleId} 
                       onChange={e => setSelectedVehicleId(e.target.value)}
                       className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800"
                     >
-                      <option value="" disabled>Choose your vehicle</option>
+                      <option value="" disabled>{t('chooseVehicle')}</option>
                       {vehicles.map(v => (
                         <option key={v.id} value={v.id}>{v.name}</option>
                       ))}
@@ -495,7 +548,7 @@ export default function DriverPanel() {
                     disabled={!selectedDriverId || !selectedVehicleId}
                     className="w-full bg-slate-900 text-white font-semibold py-3.5 rounded-xl hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all mt-6"
                   >
-                    Continue
+                    {t('continue')}
                   </button>
                 </motion.div>
               )}
@@ -508,8 +561,8 @@ export default function DriverPanel() {
                   exit={{ opacity: 0, x: -20 }}
                   className="text-center space-y-6"
                 >
-                  <h2 className="text-xl font-semibold text-slate-800">Vehicle Condition</h2>
-                  <p className="text-slate-600">Is the vehicle in good condition for the trip?</p>
+                  <h2 className="text-xl font-semibold text-slate-800">{t('vehicleCondition')}</h2>
+                  <p className="text-slate-600">{t('goodConditionQuestion')}</p>
                   
                   <div className="grid grid-cols-2 gap-4 mt-8">
                     <button 
@@ -517,14 +570,14 @@ export default function DriverPanel() {
                       className="flex flex-col items-center justify-center gap-3 p-6 border-2 border-slate-100 rounded-2xl hover:border-green-500 hover:bg-green-50 transition-all group"
                     >
                       <ShieldCheck className="w-10 h-10 text-green-500 group-hover:scale-110 transition-transform" />
-                      <span className="font-semibold text-slate-700">All Good</span>
+                      <span className="font-semibold text-slate-700">{t('allGood')}</span>
                     </button>
                     <button 
                       onClick={() => handleConditionSelect(false)}
                       className="flex flex-col items-center justify-center gap-3 p-6 border-2 border-slate-100 rounded-2xl hover:border-orange-500 hover:bg-orange-50 transition-all group"
                     >
                       <AlertCircle className="w-10 h-10 text-orange-500 group-hover:scale-110 transition-transform" />
-                      <span className="font-semibold text-slate-700">Report Issue</span>
+                      <span className="font-semibold text-slate-700">{t('reportIssue')}</span>
                     </button>
                   </div>
                 </motion.div>
@@ -537,8 +590,8 @@ export default function DriverPanel() {
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -20 }}
                 >
-                  <h2 className="text-xl font-semibold text-slate-800 mb-2">Issue Report</h2>
-                  <p className="text-sm text-slate-500 mb-6">Please check the items that are NOT OK.</p>
+                  <h2 className="text-xl font-semibold text-slate-800 mb-2">{t('issueReport')}</h2>
+                  <p className="text-sm text-slate-500 mb-6">{t('checkNotOkItems')}</p>
                   
                   <form onSubmit={handleChecklistSubmit} className="space-y-6">
                     <div className="grid grid-cols-2 gap-3 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
@@ -550,24 +603,24 @@ export default function DriverPanel() {
                             onChange={() => toggleChecklist(item)}
                             className="mt-1 rounded text-orange-500 focus:ring-orange-500"
                           />
-                          <span className="text-sm text-slate-700 select-none">{item}</span>
+                          <span className="text-sm text-slate-700 select-none">{t(item)}</span>
                         </label>
                       ))}
                     </div>
 
                     <div className="space-y-2">
-                      <label className="block text-sm font-medium text-slate-700">Additional Remarks</label>
+                      <label className="block text-sm font-medium text-slate-700">{t('additionalRemarks')}</label>
                       <textarea 
                         value={remarks}
                         onChange={e => setRemarks(e.target.value)}
                         className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all resize-none h-24"
-                        placeholder="Describe the issue..."
+                        placeholder={t('describeIssue')}
                       />
                     </div>
 
                     <div className="space-y-4 pt-2">
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-3">Is the vehicle okay to drive?</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-3">{t('okayToDriveQuestion')}</label>
                         <div className="flex gap-4">
                           <label className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-xl border cursor-pointer transition-colors ${isDriveable === true ? 'border-green-500 bg-green-50 text-green-700' : 'border-slate-200 bg-slate-50'}`}>
                             <input 
@@ -577,7 +630,7 @@ export default function DriverPanel() {
                               onChange={() => setIsDriveable(true)}
                               className="hidden"
                             />
-                            <span className="font-semibold">Yes, OK to drive</span>
+                            <span className="font-semibold">{t('okToDrive')}</span>
                           </label>
                           <label className={`flex-1 flex items-center justify-center gap-2 p-3 rounded-xl border cursor-pointer transition-colors ${isDriveable === false ? 'border-red-500 bg-red-50 text-red-700' : 'border-slate-200 bg-slate-50'}`}>
                             <input 
@@ -587,7 +640,7 @@ export default function DriverPanel() {
                               onChange={() => setIsDriveable(false)}
                               className="hidden"
                             />
-                            <span className="font-semibold">No, request service</span>
+                            <span className="font-semibold">{t('requestService')}</span>
                           </label>
                         </div>
                       </div>
@@ -605,8 +658,8 @@ export default function DriverPanel() {
                             className="w-5 h-5 rounded text-orange-600 focus:ring-orange-500 border-slate-300"
                           />
                           <div>
-                            <span className="block font-medium text-slate-800">Request Maintenance</span>
-                            <span className="block text-xs text-slate-500 mt-0.5">Vehicle requires service (e.g. after trip)</span>
+                            <span className="block font-medium text-slate-800">{t('requestMaintenance')}</span>
+                            <span className="block text-xs text-slate-500 mt-0.5">{t('requiresServiceDetail')}</span>
                           </div>
                         </motion.label>
                       )}
@@ -617,7 +670,7 @@ export default function DriverPanel() {
                       disabled={isDriveable === null}
                       className="w-full bg-slate-900 text-white font-semibold py-3 rounded-xl hover:bg-slate-800 disabled:opacity-50 transition-all"
                     >
-                      Submit Report
+                      {t('submitReport')}
                     </button>
                   </form>
                 </motion.div>
@@ -635,11 +688,11 @@ export default function DriverPanel() {
                     <Wrench className="w-10 h-10 text-orange-500 animate-pulse" />
                   </div>
                   <div>
-                    <h2 className="text-2xl font-bold text-slate-800">Service Requested</h2>
-                    <p className="text-slate-500 mt-2">Waiting for admin to resolve the issue...</p>
+                    <h2 className="text-2xl font-bold text-slate-800">{t('serviceRequested')}</h2>
+                    <p className="text-slate-500 mt-2">{t('waitingAdminResolve')}</p>
                   </div>
                   <div className="bg-orange-50 border border-orange-100 p-4 rounded-xl text-sm text-orange-800 font-medium">
-                    We'll notify you here once the vehicle is ready to go.
+                    {t('readyToGoNotification')}
                   </div>
                   <button 
                     onClick={() => {
@@ -654,7 +707,7 @@ export default function DriverPanel() {
                     }}
                     className="w-full bg-slate-900 text-white font-semibold py-3 rounded-xl hover:bg-slate-800 transition-all active:scale-95 shadow-md flex items-center justify-center gap-2"
                   >
-                    Select Another Vehicle
+                    {t('selectAnotherVehicle')}
                   </button>
                 </motion.div>
               )}
@@ -671,8 +724,8 @@ export default function DriverPanel() {
                     <div className="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
                       <Play className="w-10 h-10 text-slate-900 ml-1" />
                     </div>
-                    <h2 className="text-2xl font-bold text-slate-800">Ready to go!</h2>
-                    <p className="text-slate-500 mt-2">Have a safe and pleasant journey.</p>
+                    <h2 className="text-2xl font-bold text-slate-800">{t('readyToGo')}</h2>
+                    <p className="text-slate-500 mt-2">{t('safeJourney')}</p>
                   </div>
                   
                   <div className="space-y-3">
@@ -680,7 +733,7 @@ export default function DriverPanel() {
                       onClick={handleStartDriving}
                       className="w-full bg-slate-900 text-white text-lg font-bold py-4 rounded-xl shadow-lg shadow-slate-200 hover:bg-slate-800 transition-all active:scale-95"
                     >
-                      Start Driving
+                      {t('startDriving')}
                     </button>
                     <button 
                       onClick={() => {
@@ -695,7 +748,7 @@ export default function DriverPanel() {
                       }}
                       className="w-full text-slate-500 hover:text-slate-800 font-semibold py-2.5 rounded-xl transition-colors text-sm"
                     >
-                      Choose Different Vehicle
+                      {t('chooseDifferentVehicle')}
                     </button>
                   </div>
                 </motion.div>
@@ -715,8 +768,8 @@ export default function DriverPanel() {
                         <Route className="w-10 h-10 text-green-600" />
                       </div>
                     </div>
-                    <h2 className="text-2xl font-bold text-slate-800">Trip in Progress</h2>
-                    <p className="text-green-600 font-medium mt-2">Stay safe on the road!</p>
+                    <h2 className="text-2xl font-bold text-slate-800">{t('tripInProgress')}</h2>
+                    <p className="text-green-600 font-medium mt-2">{t('staySafe')}</p>
                   </div>
                   
                   <button 
@@ -724,7 +777,7 @@ export default function DriverPanel() {
                     className="w-full bg-slate-900 text-white flex items-center justify-center gap-2 text-lg font-bold py-4 rounded-xl shadow-lg shadow-slate-200 hover:bg-slate-800 transition-all active:scale-95"
                   >
                     <Square className="w-5 h-5 fill-current" />
-                    End Trip
+                    {t('endTrip')}
                   </button>
                 </motion.div>
               )}
@@ -739,12 +792,12 @@ export default function DriverPanel() {
                 >
                   <div className="text-center py-4">
                     <Wrench className="w-12 h-12 text-slate-900 mx-auto mb-3" />
-                    <h2 className="text-2xl font-bold text-slate-800">Post-Trip Check</h2>
-                    <p className="text-slate-500 mt-1">Please report the vehicle status after your trip.</p>
+                    <h2 className="text-2xl font-bold text-slate-800">{t('postTripCheck')}</h2>
+                    <p className="text-slate-500 mt-1">{t('postTripReportStatus')}</p>
                   </div>
 
                   <h3 className="text-lg font-semibold text-slate-700 text-center">
-                    Is the vehicle in good condition after the trip?
+                    {t('postTripGoodConditionQuestion')}
                   </h3>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -755,8 +808,8 @@ export default function DriverPanel() {
                       <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
                         <Check className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
                       </div>
-                      <span className="font-bold text-slate-800">All Good</span>
-                      <span className="text-xs text-slate-400 mt-1">No issues arose during the trip</span>
+                      <span className="font-bold text-slate-800">{t('allGood')}</span>
+                      <span className="text-xs text-slate-400 mt-1">{t('noIssuesArose')}</span>
                     </button>
 
                     <button 
@@ -766,8 +819,8 @@ export default function DriverPanel() {
                       <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
                         <AlertTriangle className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
                       </div>
-                      <span className="font-bold text-slate-800">Report Issue</span>
-                      <span className="text-xs text-slate-400 mt-1">Report a problem or damage</span>
+                      <span className="font-bold text-slate-800">{t('reportIssue')}</span>
+                      <span className="text-xs text-slate-400 mt-1">{t('reportProblemDamage')}</span>
                     </button>
                   </div>
                   
@@ -776,7 +829,7 @@ export default function DriverPanel() {
                       onClick={() => setStep('driving')}
                       className="text-sm font-semibold text-slate-500 hover:text-slate-800 py-2 px-4 transition-colors"
                     >
-                      Cancel & Return to Trip
+                      {t('cancelReturnTrip')}
                     </button>
                   </div>
                 </motion.div>
@@ -791,8 +844,8 @@ export default function DriverPanel() {
                   className="space-y-6"
                 >
                   <div className="text-center">
-                    <h2 className="text-2xl font-bold text-slate-800">Post-Trip Issue Report</h2>
-                    <p className="text-slate-500 text-sm mt-1">Please select the items that are NOT OK after the trip.</p>
+                    <h2 className="text-2xl font-bold text-slate-800">{t('postTripIssueReport')}</h2>
+                    <p className="text-slate-500 text-sm mt-1">{t('postCheckNotOkItems')}</p>
                   </div>
 
                   <form onSubmit={handlePostChecklistSubmit} className="space-y-6">
@@ -802,9 +855,9 @@ export default function DriverPanel() {
                           key={item}
                           type="button"
                           onClick={() => togglePostChecklist(item)}
-                          className={`p-3 rounded-xl border text-xs font-semibold transition-all text-left flex items-center justify-between ${postChecklist[item] ? 'border-slate-900 bg-slate-50 text-slate-900 ring-1 ring-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                          className={`p-3 rounded-xl border text-xs font-semibold transition-all text-start flex items-center justify-between ${postChecklist[item] ? 'border-slate-900 bg-slate-50 text-slate-900 ring-1 ring-slate-900' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}
                         >
-                          <span>{item}</span>
+                          <span>{t(item)}</span>
                           <span className={`w-4 h-4 rounded-full border flex items-center justify-center ${postChecklist[item] ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-300'}`}>
                             {postChecklist[item] && <Check className="w-2.5 h-2.5 stroke-[3]" />}
                           </span>
@@ -813,32 +866,32 @@ export default function DriverPanel() {
                     </div>
 
                     <div className="space-y-2">
-                      <label className="block text-sm font-medium text-slate-700">Remarks / Description of Issue</label>
+                      <label className="block text-sm font-medium text-slate-700">{t('remarksDescription')}</label>
                       <textarea
                         value={postRemarks}
                         onChange={e => setPostRemarks(e.target.value)}
-                        placeholder="Please describe any issues in detail..."
+                        placeholder={t('describeIssuesDetail')}
                         rows={3}
                         className="w-full border border-slate-200 rounded-xl p-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800 text-sm"
                       />
                     </div>
 
                     <div className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-100">
-                      <label className="block text-sm font-bold text-slate-800">Is the vehicle okay to drive now?</label>
+                      <label className="block text-sm font-bold text-slate-800">{t('isVehicleOkToDriveNow')}</label>
                       <div className="grid grid-cols-2 gap-3">
                         <button
                           type="button"
                           onClick={() => { setPostIsDriveable(true); setPostServiceNeeded(false); }}
                           className={`py-3 rounded-lg border text-sm font-semibold transition-all ${postIsDriveable === true ? 'border-slate-900 bg-white text-slate-900 ring-1 ring-slate-900 shadow-sm' : 'border-slate-250 text-slate-600 hover:bg-slate-100/50 bg-white/50'}`}
                         >
-                          Yes, OK to Drive
+                          {t('okToDriveNow')}
                         </button>
                         <button
                           type="button"
                           onClick={() => { setPostIsDriveable(false); setPostServiceNeeded(true); }}
                           className={`py-3 rounded-lg border text-sm font-semibold transition-all ${postIsDriveable === false ? 'border-slate-900 bg-white text-slate-900 ring-1 ring-slate-900 shadow-sm' : 'border-slate-250 text-slate-600 hover:bg-slate-100/50 bg-white/50'}`}
                         >
-                          No, Request Service
+                          {t('requestServiceNow')}
                         </button>
                       </div>
                     </div>
@@ -852,8 +905,8 @@ export default function DriverPanel() {
                           className="w-4 h-4 rounded text-slate-900 focus:ring-slate-900 border-slate-350"
                         />
                         <div>
-                          <span className="text-sm font-bold text-slate-800 block">Request Maintenance</span>
-                          <span className="text-xs text-slate-500 block">The vehicle is driveable but needs a checkup/service.</span>
+                          <span className="text-sm font-bold text-slate-800 block">{t('requestMaintenance')}</span>
+                          <span className="text-xs text-slate-500 block">{t('driveableNeedsCheckup')}</span>
                         </div>
                       </label>
                     )}
@@ -867,14 +920,14 @@ export default function DriverPanel() {
                         }}
                         className="flex-1 py-3.5 border border-slate-200 hover:bg-slate-50 rounded-xl font-semibold text-slate-600 text-sm transition-colors"
                       >
-                        Back
+                        {t('back')}
                       </button>
                       <button
                         type="submit"
                         disabled={postIsDriveable === null}
                         className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-bold text-sm shadow-md hover:bg-slate-800 transition-all disabled:opacity-50 active:scale-98"
                       >
-                        Submit & End Trip
+                        {t('submitEndTrip')}
                       </button>
                     </div>
                   </form>
@@ -887,8 +940,8 @@ export default function DriverPanel() {
             {!selectedDriverId ? (
               <div className="flex flex-col items-center justify-center text-center py-10 px-4 border border-dashed border-slate-200 rounded-xl bg-slate-50/50 min-h-[220px]">
                 <Clock className="w-8 h-8 text-slate-300 mb-2" />
-                <h3 className="text-sm font-semibold text-slate-600">No Driver Selected</h3>
-                <p className="text-[11px] text-slate-400 mt-1 max-w-xs">Select your name under the "Start Trip" tab first to view your history logs.</p>
+                <h3 className="text-sm font-semibold text-slate-600">{t('noDriverSelected')}</h3>
+                <p className="text-[11px] text-slate-400 mt-1 max-w-xs">{t('selectNameToViewHistory')}</p>
               </div>
             ) : (
               <div className="space-y-6">
@@ -899,14 +952,14 @@ export default function DriverPanel() {
                     onClick={() => setHistoryTab('trips')}
                     className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${historyTab === 'trips' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-850'}`}
                   >
-                    Trips Log ({myTripLogs.length})
+                    {t('tripsLogCount', { count: myTripLogs.length })}
                   </button>
                   <button
                     type="button"
                     onClick={() => setHistoryTab('issues')}
-                    className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${historyTab === 'issues' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}
+                    className={`px-4 py-2 text-xs font-bold rounded-lg transition-all ${historyTab === 'issues' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-850'}`}
                   >
-                    Service Requests ({myIssues.length})
+                    {t('serviceRequestsCount', { count: myIssues.length })}
                   </button>
                 </div>
 
@@ -914,7 +967,7 @@ export default function DriverPanel() {
                   <div className="space-y-4">
                     {myTripLogs.length === 0 ? (
                       <div className="text-center py-12 text-slate-400 font-medium bg-slate-50 rounded-xl border border-slate-100 text-xs">
-                        No completed trips recorded yet.
+                        {t('noCompletedTrips')}
                       </div>
                     ) : (
                       <>
@@ -924,13 +977,13 @@ export default function DriverPanel() {
                               <div className="min-w-0">
                                 <span className="font-bold text-slate-900 text-sm block truncate">{trip.vehicleName}</span>
                                 <span className="text-[10px] text-slate-500 font-semibold block mt-1">
-                                  {trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ' at ' + new Date(trip.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown'}
+                                  {trip.startTime ? new Date(trip.startTime).toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' ' + t('at') + ' ' + new Date(trip.startTime).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' }) : t('unknown')}
                                 </span>
                               </div>
                               
-                              <div className="text-right shrink-0">
+                              <div className="text-end shrink-0">
                                 <span className="font-bold text-slate-700 text-sm block mb-1">
-                                  {trip.duration ? formatDuration(trip.duration) : (trip.status === 'active' ? 'Active' : '-')}
+                                  {trip.duration ? formatDuration(trip.duration) : (trip.status === 'active' ? t('statusActive') : '-')}
                                 </span>
                                 {getTripStatusBadge(trip)}
                               </div>
@@ -947,16 +1000,16 @@ export default function DriverPanel() {
                               disabled={tripsPage === 1}
                               className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 disabled:opacity-50 transition-colors"
                             >
-                              Prev
+                              {t('prev')}
                             </button>
-                            <span className="text-slate-500 font-semibold">Page {tripsPage} of {totalTripsPages}</span>
+                            <span className="text-slate-500 font-semibold">{t('pageOf', { current: tripsPage, total: totalTripsPages })}</span>
                             <button
                               type="button"
                               onClick={() => setTripsPage(p => Math.min(totalTripsPages, p + 1))}
                               disabled={tripsPage === totalTripsPages}
                               className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 disabled:opacity-50 transition-colors"
                             >
-                              Next
+                              {t('next')}
                             </button>
                           </div>
                         )}
@@ -967,7 +1020,7 @@ export default function DriverPanel() {
                   <div className="space-y-4">
                     {myIssues.length === 0 ? (
                       <div className="text-center py-12 text-slate-400 font-medium bg-slate-50 rounded-xl border border-slate-100 text-xs">
-                        No reported issues or service requests found.
+                        {t('noReportedIssues')}
                       </div>
                     ) : (
                       <>
@@ -982,10 +1035,10 @@ export default function DriverPanel() {
                                   <div className="min-w-0">
                                     <span className="font-bold text-slate-900 text-sm block truncate">{trip.vehicleName}</span>
                                     <span className="text-[10px] text-slate-500 font-semibold block mt-1">
-                                      {trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ' at ' + new Date(trip.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Unknown'}
+                                      {trip.startTime ? new Date(trip.startTime).toLocaleDateString(language === 'ar' ? 'ar-EG' : 'en-US', { month: 'short', day: 'numeric', year: 'numeric' }) + ' ' + t('at') + ' ' + new Date(trip.startTime).toLocaleTimeString(language === 'ar' ? 'ar-EG' : 'en-US', { hour: '2-digit', minute: '2-digit' }) : t('unknown')}
                                     </span>
                                   </div>
-                                  <div className="shrink-0 text-right">
+                                  <div className="shrink-0 text-end">
                                     {getTripStatusBadge(trip)}
                                   </div>
                                 </div>
@@ -994,12 +1047,12 @@ export default function DriverPanel() {
                                 <div className="bg-white p-3 rounded-lg border border-slate-100 text-[11px] text-slate-600 space-y-2">
                                   {checklistItems.length > 0 && (
                                     <div>
-                                      <strong className="text-slate-800">Failed Items:</strong> {checklistItems.join(', ')}
+                                      <strong className="text-slate-800">{t('failedItems')}</strong> {checklistItems.map(item => t(item)).join(', ')}
                                     </div>
                                   )}
                                   {trip.remarks && (
                                     <div>
-                                      <strong className="text-slate-800">Remarks:</strong> "{trip.remarks}"
+                                      <strong className="text-slate-800">{t('remarksLabel')}</strong> "{trip.remarks}"
                                     </div>
                                   )}
                                 </div>
@@ -1017,16 +1070,16 @@ export default function DriverPanel() {
                               disabled={issuesPage === 1}
                               className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 disabled:opacity-50 transition-colors"
                             >
-                              Prev
+                              {t('prev')}
                             </button>
-                            <span className="text-slate-500 font-semibold">Page {issuesPage} of {totalIssuesPages}</span>
+                            <span className="text-slate-500 font-semibold">{t('pageOf', { current: issuesPage, total: totalIssuesPages })}</span>
                             <button
                               type="button"
                               onClick={() => setIssuesPage(p => Math.min(totalIssuesPages, p + 1))}
                               disabled={issuesPage === totalIssuesPages}
                               className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 font-semibold hover:bg-slate-50 disabled:opacity-50 transition-colors"
                             >
-                              Next
+                              {t('next')}
                             </button>
                           </div>
                         )}

@@ -8,5 +8,7 @@
   "messagingSenderId": "94373686894",
   "measurementId": "G-RTZ0SZ4FGG",
   "oAuthClientId": "",
-  "recaptchaSiteKey": ""
+  "recaptchaSiteKey": "",
+  "cloudinaryCloudName": "gfr9wiea",
+  "cloudinaryUploadPreset": "fleetflow_preset"
 }

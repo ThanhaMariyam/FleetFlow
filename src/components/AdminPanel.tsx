@@ -5,13 +5,14 @@ import { Driver, Vehicle, Trip } from '../types';
 import { formatDuration, formatTime } from '../utils';
 import { ShieldAlert, CheckCircle2, AlertTriangle, Clock, Wrench, ChevronDown, ChevronUp, Settings, Users, Trash2, Edit2, Car, Phone, Download, Truck, Route, Lock, LogOut, Image, X } from 'lucide-react';
 import { GoogleGenAI } from '@google/genai';
+import config from '../../firebase-applet-config.json';
 
 export default function AdminPanel() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [trips, setTrips] = useState<Trip[]>([]);
   
-  const [activeTab, setActiveTab] = useState<'active_trips' | 'service_requests' | 'history' | 'manage' | 'driver_stats'>('active_trips');
+  const [activeTab, setActiveTab] = useState<'active_trips' | 'service_requests' | 'history' | 'manage' | 'driver_stats' | 'overtime'>('active_trips');
 
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     return localStorage.getItem('fleetflow_admin_auth') === 'true';
@@ -56,6 +57,7 @@ export default function AdminPanel() {
   const [serviceCostInput, setServiceCostInput] = useState('');
   const [serviceLocationInput, setServiceLocationInput] = useState('');
   const [billImageBase64, setBillImageBase64] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
 
   // Date filters
   const [historyStartDate, setHistoryStartDate] = useState('');
@@ -63,6 +65,22 @@ export default function AdminPanel() {
   const [costsStartDate, setCostsStartDate] = useState('');
   const [costsEndDate, setCostsEndDate] = useState('');
   const [serviceTypeFilter, setServiceTypeFilter] = useState<'all' | 'performed' | 'no_service'>('all');
+
+  // Overtime states
+  const [overtimePage, setOvertimePage] = useState(1);
+  const [overtimeTimeFilter, setOvertimeTimeFilter] = useState<'all' | 'day' | 'custom'>('all');
+  const [expandedLogIds, setExpandedLogIds] = useState<Record<string, boolean>>({});
+  const [hasVisitedOvertime, setHasVisitedOvertime] = useState(false);
+  const [selectedOvertimeWeek, setSelectedOvertimeWeek] = useState('all');
+  const [selectedOvertimeMonth, setSelectedOvertimeMonth] = useState('all');
+  const [selectedOvertimeYear, setSelectedOvertimeYear] = useState('none');
+
+  const toggleExpandLog = (logId: string) => {
+    setExpandedLogIds(prev => ({
+      ...prev,
+      [logId]: !prev[logId]
+    }));
+  };
 
   // Image preview modal
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
@@ -350,6 +368,51 @@ export default function AdminPanel() {
     document.body.removeChild(link);
   };
 
+  const downloadOvertimeAsCSV = () => {
+    const headers = [
+      'Driver Name',
+      'Date',
+      'Total Rides',
+      'Total Duration',
+      'Trips Breakdown'
+    ];
+    const rows = filteredOvertimeLogs.map(log => {
+      const formattedDate = new Date(log.dateStr).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+      const durationStr = formatDuration(log.totalDuration);
+      
+      const breakdownStr = log.trips.map(trip => {
+        const timeStr = trip.startTime && trip.endTime 
+          ? `${formatTime(trip.startTime)} - ${formatTime(trip.endTime)}` 
+          : '';
+        const tripDuration = trip.duration ? formatDuration(trip.duration) : '-';
+        return `${trip.vehicleName} (${timeStr} | ${tripDuration})`;
+      }).join('; ');
+
+      return [
+        `"${log.driverName}"`,
+        `"${formattedDate}"`,
+        `"${log.trips.length}"`,
+        `"${durationStr}"`,
+        `"${breakdownStr.replace(/"/g, '""')}"`
+      ];
+    });
+
+    const csvContent = [
+      headers.join(','),
+      ...rows.map(e => e.join(','))
+    ].join('\n');
+
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `overtime_report_${overtimeTimeFilter}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const activeTrips = trips.filter(t => t.status === 'active');
   const serviceRequests = trips.filter(t => t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded));
   const completedTrips = trips.filter(t => t.status === 'completed');
@@ -395,6 +458,142 @@ export default function AdminPanel() {
   const allTimeExpense = resolvedTrips
     .filter(t => t.serviceType === 'performed')
     .reduce((sum, t) => sum + (t.serviceCost || 0), 0);
+
+  interface OvertimeLog {
+    id: string;
+    driverId: string;
+    driverName: string;
+    dateStr: string; // YYYY-MM-DD
+    totalDuration: number; // in milliseconds
+    trips: Trip[];
+  }
+
+  const overtimeLogs: OvertimeLog[] = (() => {
+    const groups: Record<string, { driverId: string; driverName: string; dateStr: string; trips: Trip[]; totalDuration: number }> = {};
+
+    completedTrips.forEach(trip => {
+      if (!trip.startTime || !trip.duration) return;
+      
+      const date = new Date(trip.startTime);
+      const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+      
+      const key = `${trip.driverId}_${dateStr}`;
+      
+      if (!groups[key]) {
+        groups[key] = {
+          driverId: trip.driverId,
+          driverName: trip.driverName,
+          dateStr,
+          trips: [],
+          totalDuration: 0
+        };
+      }
+      
+      groups[key].trips.push(trip);
+      groups[key].totalDuration += trip.duration;
+    });
+
+    return Object.values(groups)
+      .filter(g => g.totalDuration >= 8 * 60 * 60 * 1000)
+      .map((g, idx) => ({
+        id: `${g.driverId}_${g.dateStr}_${idx}`,
+        ...g
+      }))
+      .sort((a, b) => b.dateStr.localeCompare(a.dateStr));
+  })();
+
+  // Get list of last 5 years (current year + past 4 years)
+  const availableYears = (() => {
+    const currentYear = new Date().getFullYear();
+    const years: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      years.push(String(currentYear - i));
+    }
+    return years;
+  })();
+
+  const monthsList = [
+    { value: '0', label: 'January' },
+    { value: '1', label: 'February' },
+    { value: '2', label: 'March' },
+    { value: '3', label: 'April' },
+    { value: '4', label: 'May' },
+    { value: '5', label: 'June' },
+    { value: '6', label: 'July' },
+    { value: '7', label: 'August' },
+    { value: '8', label: 'September' },
+    { value: '9', label: 'October' },
+    { value: '10', label: 'November' },
+    { value: '11', label: 'December' },
+  ];
+
+  // Generate all Sundays for the selected Year and Month
+  const availableWeeksOfSelectedMonth = (() => {
+    if (selectedOvertimeMonth === 'all') return [];
+    const year = Number(selectedOvertimeYear);
+    const month = Number(selectedOvertimeMonth);
+    
+    const sundays: { value: string; label: string }[] = [];
+    const date = new Date(year, month, 1);
+    const startSunday = new Date(date);
+    startSunday.setDate(date.getDate() - date.getDay());
+    
+    const lastDayOfMonth = new Date(year, month + 1, 0);
+    const currentSun = new Date(startSunday);
+    
+    while (currentSun.getTime() <= lastDayOfMonth.getTime() || currentSun.getMonth() === month) {
+      const sunStr = `${currentSun.getFullYear()}-${String(currentSun.getMonth() + 1).padStart(2, '0')}-${String(currentSun.getDate()).padStart(2, '0')}`;
+      const label = `Week of ${currentSun.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}`;
+      sundays.push({ value: sunStr, label });
+      currentSun.setDate(currentSun.getDate() + 7);
+    }
+    return sundays;
+  })();
+
+  const filteredOvertimeLogs = overtimeLogs.filter(log => {
+    const logDate = new Date(log.dateStr);
+    const now = new Date();
+    
+    if (overtimeTimeFilter === 'day') {
+      return logDate.getFullYear() === now.getFullYear() &&
+             logDate.getMonth() === now.getMonth() &&
+             logDate.getDate() === now.getDate();
+    }
+    
+    if (overtimeTimeFilter === 'custom') {
+      if (selectedOvertimeYear === 'none') {
+        return false;
+      }
+      // 1. Year Filter
+      if (logDate.getFullYear() !== Number(selectedOvertimeYear)) {
+        return false;
+      }
+      
+      // 2. Month Filter
+      if (selectedOvertimeMonth !== 'all') {
+        if (logDate.getMonth() !== Number(selectedOvertimeMonth)) {
+          return false;
+        }
+        
+        // 3. Week Filter
+        if (selectedOvertimeWeek !== 'all') {
+          const startOfWeek = new Date(selectedOvertimeWeek);
+          startOfWeek.setHours(0, 0, 0, 0);
+          
+          const endOfWeek = new Date(startOfWeek);
+          endOfWeek.setDate(startOfWeek.getDate() + 6);
+          endOfWeek.setHours(23, 59, 59, 999);
+          
+          if (logDate.getTime() < startOfWeek.getTime() || logDate.getTime() > endOfWeek.getTime()) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+    
+    return true;
+  });
 
 function Pagination({ total, current, onChange, itemsPerPage = 5 }: { total: number, current: number, onChange: (page: number) => void, itemsPerPage?: number }) {
   const pages = Math.max(1, Math.ceil(total / itemsPerPage));
@@ -932,6 +1131,19 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
             className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors whitespace-nowrap ${activeTab === 'history' ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}`}
           >
             <Clock className="w-4 h-4" /> Trip History
+          </button>
+          <button 
+            onClick={() => {
+              setActiveTab('overtime');
+              setOvertimePage(1);
+              setHasVisitedOvertime(true);
+            }}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-colors whitespace-nowrap ${activeTab === 'overtime' ? 'bg-slate-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}`}
+          >
+            <Clock className="w-4 h-4" /> Overtime Logs
+            {!hasVisitedOvertime && filteredOvertimeLogs.length > 0 && (
+              <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${activeTab === 'overtime' ? 'bg-white/20 text-white' : 'bg-red-100 text-red-600'}`}>{filteredOvertimeLogs.length}</span>
+            )}
           </button>
           <button 
             onClick={() => setActiveTab('manage')}
@@ -1673,6 +1885,199 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
           </div>
           );
         })()}
+
+        {activeTab === 'overtime' && (() => {
+          const paginatedOvertime = filteredOvertimeLogs.slice((overtimePage - 1) * ITEMS_PER_PAGE, overtimePage * ITEMS_PER_PAGE);
+          return (
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                <div>
+                  <h2 className="text-xl font-semibold text-slate-800">Overtime Logs ({filteredOvertimeLogs.length})</h2>
+                  <p className="text-xs text-slate-500 mt-1 max-w-xl">
+                    Lists drivers whose cumulative driving duration met or exceeded 8 hours on a single calendar day.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  {filteredOvertimeLogs.length > 0 && (
+                    <button
+                      onClick={downloadOvertimeAsCSV}
+                      className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-medium transition-colors shadow-sm whitespace-nowrap text-sm cursor-pointer"
+                    >
+                      <Download className="w-4 h-4" /> Export as CSV
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6 text-sm">
+                <div className="flex bg-slate-200/60 p-1 rounded-lg gap-1 text-xs font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOvertimeTimeFilter('all');
+                      setSelectedOvertimeYear('none');
+                      setSelectedOvertimeMonth('all');
+                      setSelectedOvertimeWeek('all');
+                      setOvertimePage(1);
+                    }}
+                    className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${overtimeTimeFilter === 'all' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-650 hover:text-slate-900'}`}
+                  >
+                    All Time
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setOvertimeTimeFilter('day');
+                      setSelectedOvertimeYear('none');
+                      setSelectedOvertimeMonth('all');
+                      setSelectedOvertimeWeek('all');
+                      setOvertimePage(1);
+                    }}
+                    className={`px-3 py-1.5 rounded-md transition-all cursor-pointer ${overtimeTimeFilter === 'day' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-650 hover:text-slate-900'}`}
+                  >
+                    Today
+                  </button>
+                </div>
+
+                <div className="h-4 w-px bg-slate-200/80 mx-1" />
+
+                {/* Year Selector */}
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-slate-700">Year:</span>
+                  <select
+                    value={selectedOvertimeYear}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setSelectedOvertimeYear(val);
+                      if (val === 'none') {
+                        setOvertimeTimeFilter('all');
+                        setSelectedOvertimeMonth('all');
+                        setSelectedOvertimeWeek('all');
+                      } else {
+                        setOvertimeTimeFilter('custom');
+                        setSelectedOvertimeMonth('all'); // Reset month when year changes
+                        setSelectedOvertimeWeek('all'); // Reset week when year changes
+                      }
+                      setOvertimePage(1);
+                    }}
+                    className="border border-slate-200 rounded-lg px-3 py-1.5 bg-white cursor-pointer text-slate-800 text-xs font-semibold focus:ring-2 focus:ring-slate-900 outline-none"
+                  >
+                    <option value="none">Select Year</option>
+                    {availableYears.map(y => (
+                      <option key={y} value={y}>{y}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Month Selector (shown only if a year is selected) */}
+                {selectedOvertimeYear !== 'none' && (
+                  <div className="flex items-center gap-2 animate-fadeIn">
+                    <span className="font-semibold text-slate-700">Month:</span>
+                    <select
+                      value={selectedOvertimeMonth}
+                      onChange={e => {
+                        setSelectedOvertimeMonth(e.target.value);
+                        setOvertimeTimeFilter('custom');
+                        setOvertimePage(1);
+                        setSelectedOvertimeWeek('all'); // Reset week when month changes
+                      }}
+                      className="border border-slate-200 rounded-lg px-3 py-1.5 bg-white cursor-pointer text-slate-800 text-xs font-semibold focus:ring-2 focus:ring-slate-900 outline-none"
+                    >
+                      <option value="all">All Months</option>
+                      {monthsList.map(m => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Week Selector (shown only if a specific year and month are selected) */}
+                {selectedOvertimeYear !== 'none' && selectedOvertimeMonth !== 'all' && (
+                  <div className="flex items-center gap-2 animate-fadeIn">
+                    <span className="font-semibold text-slate-700">Week:</span>
+                    <select
+                      value={selectedOvertimeWeek}
+                      onChange={e => {
+                        setSelectedOvertimeWeek(e.target.value);
+                        setOvertimeTimeFilter('custom');
+                        setOvertimePage(1);
+                      }}
+                      className="border border-slate-200 rounded-lg px-3 py-1.5 bg-white cursor-pointer text-slate-800 text-xs font-semibold focus:ring-2 focus:ring-slate-900 outline-none"
+                    >
+                      <option value="all">All Weeks</option>
+                      {availableWeeksOfSelectedMonth.map(w => (
+                        <option key={w.value} value={w.value}>{w.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead>
+                    <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                      <th className="pb-3 font-semibold px-2">Driver</th>
+                      <th className="pb-3 font-semibold px-2">Date</th>
+                      <th className="pb-3 font-semibold px-2">Daily Summary</th>
+                      <th className="pb-3 font-semibold px-2">Trips Breakdown</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {paginatedOvertime.map(log => (
+                      <tr key={log.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
+                        <td className="py-4 px-2 font-semibold text-slate-900">{log.driverName}</td>
+                        <td className="py-4 px-2 font-semibold text-slate-700 whitespace-nowrap">
+                          {new Date(log.dateStr).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </td>
+                        <td className="py-4 px-2">
+                          <div className="font-bold text-red-650">{formatDuration(log.totalDuration)}</div>
+                          <div className="text-xs text-slate-500 font-semibold mt-0.5">{log.trips.length} {log.trips.length === 1 ? 'ride' : 'rides'}</div>
+                        </td>
+                        <td className="py-4 px-2">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpandLog(log.id)}
+                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none focus:ring-0 active:scale-95"
+                          >
+                            <span>{expandedLogIds[log.id] ? 'Hide Details' : 'Show Details'}</span>
+                            {expandedLogIds[log.id] ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                          </button>
+                          {expandedLogIds[log.id] && (
+                            <div className="space-y-3 mt-3 animate-fadeIn">
+                              {log.trips.map(trip => (
+                                <div key={trip.id} className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-2 max-w-lg">
+                                  <div className="text-xs">
+                                    <div className="font-semibold text-slate-800">{trip.vehicleName}</div>
+                                    <div className="text-slate-500 font-medium mt-0.5">
+                                      {trip.startTime ? formatTime(trip.startTime) : '-'} <span className="text-slate-300 mx-1">→</span> {trip.endTime ? formatTime(trip.endTime) : '-'}
+                                    </div>
+                                  </div>
+                                  <div className="font-bold text-slate-700 shrink-0 text-xs md:text-end">
+                                    {trip.duration ? formatDuration(trip.duration) : '-'}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {filteredOvertimeLogs.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-12 text-center text-slate-500 font-medium">
+                          No overtime logs match the selected timeframe filter.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <Pagination total={filteredOvertimeLogs.length} current={overtimePage} onChange={setOvertimePage} />
+            </div>
+          );
+        })()}
       </main>
 
       {resolvingTripId && (
@@ -1738,19 +2143,61 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                     <input
                       type="file"
                       accept="image/*"
-                      onChange={e => {
+                      disabled={isUploading}
+                      onChange={async e => {
                         const file = e.target.files?.[0];
                         if (file) {
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
-                            setBillImageBase64(reader.result as string);
-                          };
-                          reader.readAsDataURL(file);
+                          const cloudName = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || (config as any).cloudinaryCloudName;
+                          const uploadPreset = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || (config as any).cloudinaryUploadPreset;
+
+                          if (cloudName && uploadPreset) {
+                            setIsUploading(true);
+                            try {
+                              const formData = new FormData();
+                              formData.append('file', file);
+                              formData.append('upload_preset', uploadPreset);
+                              const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+                                method: 'POST',
+                                body: formData
+                              });
+                              if (!res.ok) {
+                                throw new Error('Upload failed with status ' + res.status);
+                              }
+                              const data = await res.json();
+                              setBillImageBase64(data.secure_url);
+                            } catch (err: any) {
+                              console.error(err);
+                              alert('Cloudinary upload failed, falling back to local storage: ' + (err.message || err));
+                              const reader = new FileReader();
+                              reader.onloadend = () => {
+                                setBillImageBase64(reader.result as string);
+                              };
+                              reader.readAsDataURL(file);
+                            } finally {
+                              setIsUploading(false);
+                            }
+                          } else {
+                            const reader = new FileReader();
+                            reader.onloadend = () => {
+                              setBillImageBase64(reader.result as string);
+                            };
+                            reader.readAsDataURL(file);
+                          }
                         }
                       }}
-                      className="w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer"
+                      className="w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer disabled:opacity-50"
                     />
-                    {billImageBase64 && (
+                    {isUploading && (
+                      <div className="text-xs text-blue-600 font-semibold mt-1 animate-pulse">
+                        Uploading to Cloudinary...
+                      </div>
+                    )}
+                    {!isUploading && !import.meta.env.VITE_CLOUDINARY_CLOUD_NAME && !(config as any).cloudinaryCloudName && (
+                      <div className="text-[10px] text-amber-600 font-medium mt-1">
+                        Note: Cloudinary not configured. Falling back to local Base64 (max 1MB).
+                      </div>
+                    )}
+                    {billImageBase64 && !isUploading && (
                       <div className="mt-2 relative inline-block">
                         <img src={billImageBase64} alt="Bill Preview" className="h-16 rounded border border-slate-200 object-cover" />
                         <button
@@ -1783,10 +2230,10 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
               </button>
               <button 
                 onClick={handleConfirmResolve}
-                disabled={serviceType === 'performed' && (!serviceLocationInput.trim() || !serviceCostInput)}
-                className="flex-1 py-3 px-4 rounded-xl font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-50 active:scale-95"
+                disabled={isUploading || (serviceType === 'performed' && (!serviceLocationInput.trim() || !serviceCostInput))}
+                className="flex-1 py-3 px-4 rounded-xl font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-50 active:scale-95 flex items-center justify-center gap-2"
               >
-                Resolve
+                {isUploading ? 'Uploading Image...' : 'Resolve'}
               </button>
             </div>
           </div>
