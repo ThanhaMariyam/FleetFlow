@@ -85,6 +85,18 @@ export default function AdminPanel() {
   // Image preview modal
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
+  // Delete confirmation modal state
+  interface DeleteTarget {
+    type: 'driver' | 'vehicle' | 'trip' | 'overtime';
+    id?: string;
+    tripIds?: string[];
+    title: string;
+    description: string;
+    itemDetails?: { label: string; value: string }[];
+  }
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   const [activeTripsPage, setActiveTripsPage] = useState(1);
   const [serviceRequestsPage, setServiceRequestsPage] = useState(1);
   const [resolvedCostsPage, setResolvedCostsPage] = useState(1);
@@ -153,15 +165,39 @@ export default function AdminPanel() {
     }
   };
 
-  const handleDeleteDriver = async (id: string) => {
-    if (confirm('Are you sure you want to delete this driver?')) {
-      try {
-        await deleteDoc(doc(db, 'drivers', id));
-      } catch (err: any) {
-        console.error(err);
-        alert('Failed to delete driver: ' + (err.message || err));
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      if (deleteTarget.type === 'driver' && deleteTarget.id) {
+        await deleteDoc(doc(db, 'drivers', deleteTarget.id));
+      } else if (deleteTarget.type === 'vehicle' && deleteTarget.id) {
+        await deleteDoc(doc(db, 'vehicles', deleteTarget.id));
+      } else if (deleteTarget.type === 'trip' && deleteTarget.id) {
+        await deleteDoc(doc(db, 'trips', deleteTarget.id));
+      } else if (deleteTarget.type === 'overtime' && deleteTarget.tripIds) {
+        await Promise.all(deleteTarget.tripIds.map(tId => deleteDoc(doc(db, 'trips', tId))));
       }
+      setDeleteTarget(null);
+    } catch (err: any) {
+      console.error(err);
+      alert('Failed to delete: ' + (err.message || err));
+    } finally {
+      setIsDeleting(false);
     }
+  };
+
+  const requestDeleteDriver = (driver: Driver) => {
+    setDeleteTarget({
+      type: 'driver',
+      id: driver.id,
+      title: 'Delete Driver',
+      description: `Are you sure you want to delete driver "${driver.name}"? This action cannot be undone.`,
+      itemDetails: [
+        { label: 'Driver Name', value: driver.name },
+        { label: 'Phone Number', value: driver.phoneNumber || 'None' }
+      ]
+    });
   };
 
   const handleAddVehicle = async (e: React.FormEvent) => {
@@ -190,15 +226,110 @@ export default function AdminPanel() {
     }
   };
 
-  const handleDeleteVehicle = async (id: string) => {
-    if (confirm('Are you sure you want to delete this vehicle?')) {
-      try {
-        await deleteDoc(doc(db, 'vehicles', id));
-      } catch (err: any) {
-        console.error(err);
-        alert('Failed to delete vehicle: ' + (err.message || err));
-      }
-    }
+  const requestDeleteVehicle = (vehicle: Vehicle) => {
+    setDeleteTarget({
+      type: 'vehicle',
+      id: vehicle.id,
+      title: 'Delete Vehicle',
+      description: `Are you sure you want to delete vehicle "${vehicle.name}"? This action cannot be undone.`,
+      itemDetails: [
+        { label: 'Vehicle Identifier / Plate', value: vehicle.name }
+      ]
+    });
+  };
+
+  const requestDeleteResolvedCost = (trip: Trip) => {
+    const resolvedDate = trip.resolvedAt ? new Date(trip.resolvedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
+    const costStr = trip.serviceType === 'no_service' ? 'No Service Needed' : `OMR ${(trip.serviceCost || 0).toFixed(3)}`;
+    setDeleteTarget({
+      type: 'trip',
+      id: trip.id,
+      title: 'Delete Resolved Cost Record',
+      description: 'Are you sure you want to delete this maintenance cost log entry? This will permanently delete this record from the database.',
+      itemDetails: [
+        { label: 'Vehicle', value: trip.vehicleName },
+        { label: 'Reported By', value: trip.driverName },
+        { label: 'Resolved Date', value: resolvedDate },
+        { label: 'Service Type', value: trip.serviceType === 'no_service' ? 'Solved Without Service' : 'Service Performed' },
+        { label: 'Shop / Dealer', value: trip.serviceLocation || '-' },
+        { label: 'Cost', value: costStr }
+      ]
+    });
+  };
+
+  const requestDeletePendingService = (trip: Trip) => {
+    setDeleteTarget({
+      type: 'trip',
+      id: trip.id,
+      title: 'Delete Service Request',
+      description: 'Are you sure you want to delete this service request? This will permanently remove the reported request.',
+      itemDetails: [
+        { label: 'Driver', value: trip.driverName },
+        { label: 'Vehicle', value: trip.vehicleName },
+        { label: 'Reported Time', value: trip.startTime ? formatTime(trip.startTime) : 'Unknown' }
+      ]
+    });
+  };
+
+  const requestDeleteActiveTrip = (trip: Trip) => {
+    setDeleteTarget({
+      type: 'trip',
+      id: trip.id,
+      title: 'Delete Active Trip',
+      description: 'Are you sure you want to delete this active trip? This will immediately remove the active trip from the system.',
+      itemDetails: [
+        { label: 'Driver', value: trip.driverName },
+        { label: 'Vehicle', value: trip.vehicleName },
+        { label: 'Start Time', value: trip.startTime ? formatTime(trip.startTime) : 'Unknown' }
+      ]
+    });
+  };
+
+  const requestDeleteTripHistory = (trip: Trip) => {
+    const tripDate = trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '-';
+    setDeleteTarget({
+      type: 'trip',
+      id: trip.id,
+      title: 'Delete Trip History Record',
+      description: 'Are you sure you want to delete this completed trip record? This action cannot be undone.',
+      itemDetails: [
+        { label: 'Driver', value: trip.driverName },
+        { label: 'Vehicle', value: trip.vehicleName },
+        { label: 'Date', value: tripDate },
+        { label: 'Duration', value: trip.duration ? formatDuration(trip.duration) : '-' }
+      ]
+    });
+  };
+
+  const requestDeleteOvertimeLog = (log: OvertimeLog) => {
+    const formattedDate = new Date(log.dateStr).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    setDeleteTarget({
+      type: 'overtime',
+      tripIds: log.trips.map(t => t.id),
+      title: 'Delete Overtime Log',
+      description: `Are you sure you want to delete this overtime log? This will permanently delete all ${log.trips.length} completed trip record(s) on ${formattedDate} for driver ${log.driverName}.`,
+      itemDetails: [
+        { label: 'Driver', value: log.driverName },
+        { label: 'Date', value: formattedDate },
+        { label: 'Total Duration', value: formatDuration(log.totalDuration) },
+        { label: 'Trips Count', value: `${log.trips.length} ride(s)` }
+      ]
+    });
+  };
+
+  const requestDeleteSingleOvertimeTrip = (trip: Trip, driverName: string) => {
+    setDeleteTarget({
+      type: 'trip',
+      id: trip.id,
+      title: 'Delete Trip Record',
+      description: 'Are you sure you want to delete this individual trip record from the overtime breakdown?',
+      itemDetails: [
+        { label: 'Driver', value: driverName },
+        { label: 'Vehicle', value: trip.vehicleName },
+        { label: 'Timing', value: `${trip.startTime ? formatTime(trip.startTime) : '-'} → ${trip.endTime ? formatTime(trip.endTime) : '-'}` },
+        { label: 'Duration', value: trip.duration ? formatDuration(trip.duration) : '-' }
+      ]
+    });
   };
 
   const confirmResolve = (tripId: string, currentStatus: string) => {
@@ -249,6 +380,7 @@ export default function AdminPanel() {
 
   const downloadHistoryAsCSV = () => {
     const headers = [
+      'Sl. No.',
       'Date',
       'Driver Name', 
       'Vehicle Identifier', 
@@ -260,11 +392,12 @@ export default function AdminPanel() {
       'After Trip Condition', 
       'After Trip Remarks'
     ];
-    const rows = filteredCompletedTrips.map(trip => {
+    const rows = filteredCompletedTrips.map((trip, idx) => {
       const beforeChecks = trip.condition === 'ok' ? 'All Good' : 'Issues Reported';
       const afterChecks = trip.endCondition === 'ok' ? 'All Good' : (trip.endCondition === 'not_ok' ? 'Issues Reported' : '-');
       const tripDate = trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
       return [
+        `"${idx + 1}"`,
         `"${tripDate}"`,
         `"${trip.driverName}"`,
         `"${trip.vehicleName}"`,
@@ -296,6 +429,7 @@ export default function AdminPanel() {
 
   const downloadCostsAsCSV = () => {
     const headers = [
+      'Sl. No.',
       'Vehicle Identifier',
       'Driver Name',
       'Reported Date',
@@ -308,7 +442,7 @@ export default function AdminPanel() {
       'Issues Reported',
       'Receipt Status'
     ];
-    const rows = filteredResolvedTrips.map(trip => {
+    const rows = filteredResolvedTrips.map((trip, idx) => {
       const repDate = trip.startTime ? new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
       const reportTime = trip.startTime ? formatTime(trip.startTime) : 'Unknown';
       const resDate = trip.resolvedAt ? new Date(trip.resolvedAt).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : 'Unknown';
@@ -324,6 +458,7 @@ export default function AdminPanel() {
       const receiptStr = trip.billImage ? 'Attached' : 'No Receipt';
 
       return [
+        `"${idx + 1}"`,
         `"${trip.vehicleName}"`,
         `"${trip.driverName}"`,
         `"${repDate}"`,
@@ -342,6 +477,7 @@ export default function AdminPanel() {
     rows.push([]);
     rows.push([
       '"Total Maintenance Cost (OMR)"',
+      '""',
       '""',
       '""',
       '""',
@@ -370,13 +506,14 @@ export default function AdminPanel() {
 
   const downloadOvertimeAsCSV = () => {
     const headers = [
+      'Sl. No.',
       'Driver Name',
       'Date',
       'Total Rides',
       'Total Duration',
       'Trips Breakdown'
     ];
-    const rows = filteredOvertimeLogs.map(log => {
+    const rows = filteredOvertimeLogs.map((log, idx) => {
       const formattedDate = new Date(log.dateStr).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
       const durationStr = formatDuration(log.totalDuration);
       
@@ -389,6 +526,7 @@ export default function AdminPanel() {
       }).join('; ');
 
       return [
+        `"${idx + 1}"`,
         `"${log.driverName}"`,
         `"${formattedDate}"`,
         `"${log.trips.length}"`,
@@ -415,6 +553,9 @@ export default function AdminPanel() {
 
   const activeTrips = trips.filter(t => t.status === 'active');
   const serviceRequests = trips.filter(t => t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded));
+  const filteredServiceRequests = driverFilter 
+    ? serviceRequests.filter(t => t.driverId === driverFilter)
+    : serviceRequests;
   const completedTrips = trips.filter(t => t.status === 'completed');
   const resolvedTrips = trips.filter(t => (t.condition === 'not_ok' || t.endCondition === 'not_ok') && t.resolvedAt !== undefined);
 
@@ -999,6 +1140,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
   useEffect(() => {
     setActiveTripsPage(1);
     setServiceRequestsPage(1);
+    setResolvedCostsPage(1);
     setHistoryPage(1);
     setDriversPage(1);
     setVehiclesPage(1);
@@ -1007,6 +1149,46 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
       setDriverFilter('');
     }
   }, [activeTab]);
+
+  useEffect(() => {
+    const maxActive = Math.max(1, Math.ceil(activeTrips.length / ITEMS_PER_PAGE));
+    if (activeTripsPage > maxActive) setActiveTripsPage(maxActive);
+
+    const maxService = Math.max(1, Math.ceil(filteredServiceRequests.length / ITEMS_PER_PAGE));
+    if (serviceRequestsPage > maxService) setServiceRequestsPage(maxService);
+
+    const maxResolved = Math.max(1, Math.ceil(filteredResolvedTrips.length / ITEMS_PER_PAGE));
+    if (resolvedCostsPage > maxResolved) setResolvedCostsPage(maxResolved);
+
+    const maxHistory = Math.max(1, Math.ceil(filteredCompletedTrips.length / ITEMS_PER_PAGE));
+    if (historyPage > maxHistory) setHistoryPage(maxHistory);
+
+    const maxOvertime = Math.max(1, Math.ceil(filteredOvertimeLogs.length / ITEMS_PER_PAGE));
+    if (overtimePage > maxOvertime) setOvertimePage(maxOvertime);
+
+    const maxDrivers = Math.max(1, Math.ceil(drivers.length / ITEMS_PER_PAGE));
+    if (driversPage > maxDrivers) setDriversPage(maxDrivers);
+    if (statsPage > maxDrivers) setStatsPage(maxDrivers);
+
+    const maxVehicles = Math.max(1, Math.ceil(vehicles.length / ITEMS_PER_PAGE));
+    if (vehiclesPage > maxVehicles) setVehiclesPage(maxVehicles);
+  }, [
+    activeTrips.length,
+    filteredServiceRequests.length,
+    filteredResolvedTrips.length,
+    filteredCompletedTrips.length,
+    filteredOvertimeLogs.length,
+    drivers.length,
+    vehicles.length,
+    activeTripsPage,
+    serviceRequestsPage,
+    resolvedCostsPage,
+    historyPage,
+    overtimePage,
+    driversPage,
+    statsPage,
+    vehiclesPage
+  ]);
 
   if (!isAuthenticated) {
     return (
@@ -1203,6 +1385,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                   <table className="w-full text-left text-sm whitespace-nowrap">
                     <thead>
                       <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                        <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                         <th className="pb-3 font-semibold px-2">Driver Name</th>
                         <th className="pb-3 font-semibold px-2">Phone Number</th>
                         <th className="pb-3 font-semibold px-2">Total Rides</th>
@@ -1213,7 +1396,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {paginatedDrivers.map(d => {
+                      {paginatedDrivers.map((d, idx) => {
                         const driverTrips = trips.filter(t => t.driverId === d.id);
                         const rideCount = completedTrips.filter(t => t.driverName === d.name).length;
                         const reportedCount = driverTrips.filter(t => t.condition === 'not_ok').length;
@@ -1222,6 +1405,9 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                         
                         return (
                           <tr key={d.id} className="text-slate-800 align-middle hover:bg-slate-50 transition-colors">
+                            <td className="py-3 px-2 font-semibold text-slate-500 text-xs">
+                              {(driversPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                            </td>
                             <td className="py-3 px-2">
                               {editingDriverId === d.id ? (
                                 <input
@@ -1264,7 +1450,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                     setActiveTab('service_requests');
                                     setServiceRequestsPage(1);
                                   }}
-                                  className="text-orange-600 hover:text-orange-800 underline font-semibold flex items-center gap-1 active:scale-95 text-left"
+                                  className="text-orange-600 hover:text-orange-800 underline font-semibold flex items-center gap-1 active:scale-95 text-left cursor-pointer"
                                   title="Click to view unsolved requests"
                                 >
                                   <AlertTriangle className="w-3.5 h-3.5" /> {toSolveCount} pending
@@ -1276,8 +1462,8 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                             <td className="py-3 px-2 text-right">
                               {editingDriverId === d.id ? (
                                 <div className="flex gap-2 justify-end">
-                                  <button onClick={handleUpdateDriver} className="text-white bg-slate-900 px-3 py-1.5 hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors">Save</button>
-                                  <button onClick={() => setEditingDriverId(null)} className="text-slate-600 bg-slate-200 px-3 py-1.5 hover:bg-slate-300 rounded-lg text-xs font-medium transition-colors">Cancel</button>
+                                  <button onClick={handleUpdateDriver} className="text-white bg-slate-900 px-3 py-1.5 hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors cursor-pointer">Save</button>
+                                  <button onClick={() => setEditingDriverId(null)} className="text-slate-600 bg-slate-200 px-3 py-1.5 hover:bg-slate-300 rounded-lg text-xs font-medium transition-colors cursor-pointer">Cancel</button>
                                 </div>
                               ) : (
                                 <div className="flex items-center justify-end gap-1">
@@ -1287,13 +1473,15 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                       setEditDriverName(d.name);
                                       setEditDriverPhone(d.phoneNumber || '+968');
                                     }}
-                                    className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+                                    className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                                    title="Edit Driver"
                                   >
                                     <Edit2 className="w-4 h-4" />
                                   </button>
                                   <button 
-                                    onClick={() => handleDeleteDriver(d.id)}
-                                    className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                    onClick={() => requestDeleteDriver(d)}
+                                    className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                    title="Delete Driver"
                                   >
                                     <Trash2 className="w-4 h-4" />
                                   </button>
@@ -1305,7 +1493,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       })}
                       {drivers.length === 0 && (
                         <tr>
-                          <td colSpan={4} className="py-8 text-center text-slate-500 font-medium">No drivers added yet.</td>
+                          <td colSpan={8} className="py-8 text-center text-slate-500 font-medium">No drivers added yet.</td>
                         </tr>
                       )}
                     </tbody>
@@ -1325,7 +1513,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                     placeholder="Vehicle Identifier / Plate"
                     className="flex-1 border border-slate-200 rounded-xl px-4 py-2.5 bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all"
                   />
-                  <button type="submit" className="bg-slate-900 text-white px-6 py-2.5 rounded-xl font-medium hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap">
+                  <button type="submit" className="bg-slate-900 text-white px-6 py-2.5 rounded-xl font-medium hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap cursor-pointer">
                     Add Vehicle
                   </button>
                 </form>
@@ -1334,13 +1522,17 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                   <table className="w-full text-left text-sm whitespace-nowrap">
                     <thead>
                       <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                        <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                         <th className="pb-3 font-semibold px-2">Vehicle Identifier / Plate</th>
                         <th className="pb-3 font-semibold px-2 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {paginatedVehicles.map(v => (
+                      {paginatedVehicles.map((v, idx) => (
                         <tr key={v.id} className="text-slate-800 align-middle hover:bg-slate-50 transition-colors">
+                          <td className="py-3 px-2 font-semibold text-slate-500 text-xs">
+                            {(vehiclesPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                          </td>
                           <td className="py-3 px-2">
                             {editingVehicleId === v.id ? (
                               <input
@@ -1356,8 +1548,8 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                           <td className="py-3 px-2 text-right">
                             {editingVehicleId === v.id ? (
                               <div className="flex gap-2 justify-end">
-                                <button onClick={handleUpdateVehicle} className="text-white bg-slate-900 px-3 py-1.5 hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors">Save</button>
-                                <button onClick={() => setEditingVehicleId(null)} className="text-slate-600 bg-slate-200 px-3 py-1.5 hover:bg-slate-300 rounded-lg text-xs font-medium transition-colors">Cancel</button>
+                                <button onClick={handleUpdateVehicle} className="text-white bg-slate-900 px-3 py-1.5 hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors cursor-pointer">Save</button>
+                                <button onClick={() => setEditingVehicleId(null)} className="text-slate-600 bg-slate-200 px-3 py-1.5 hover:bg-slate-300 rounded-lg text-xs font-medium transition-colors cursor-pointer">Cancel</button>
                               </div>
                             ) : (
                               <div className="flex items-center justify-end gap-1">
@@ -1366,13 +1558,15 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                     setEditingVehicleId(v.id);
                                     setEditVehicleName(v.name);
                                   }}
-                                  className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
+                                  className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+                                  title="Edit Vehicle"
                                 >
                                   <Edit2 className="w-4 h-4" />
                                 </button>
                                 <button 
-                                  onClick={() => handleDeleteVehicle(v.id)}
-                                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                  onClick={() => requestDeleteVehicle(v)}
+                                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                  title="Delete Vehicle"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </button>
@@ -1383,7 +1577,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       ))}
                       {vehicles.length === 0 && (
                         <tr>
-                          <td colSpan={2} className="py-8 text-center text-slate-500 font-medium">No vehicles added yet.</td>
+                          <td colSpan={3} className="py-8 text-center text-slate-500 font-medium">No vehicles added yet.</td>
                         </tr>
                       )}
                     </tbody>
@@ -1407,25 +1601,39 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                    <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                     <th className="pb-3 font-semibold px-2">Driver Name</th>
                     <th className="pb-3 font-semibold px-2">Phone Number</th>
                     <th className="pb-3 font-semibold px-2">Total Rides Completed</th>
+                    <th className="pb-3 font-semibold px-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {paginatedDrivers.map(driver => {
+                  {paginatedDrivers.map((driver, idx) => {
                     const rideCount = completedTrips.filter(t => t.driverName === driver.name).length;
                     return (
                       <tr key={driver.id} className="text-slate-800 align-middle hover:bg-slate-50 transition-colors">
+                        <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                          {(statsPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                        </td>
                         <td className="py-4 px-2 font-semibold text-slate-900">{driver.name}</td>
                         <td className="py-4 px-2 font-medium text-slate-600">{driver.phoneNumber || '-'}</td>
                         <td className="py-4 px-2 font-bold text-slate-900">{rideCount}</td>
+                        <td className="py-4 px-2 text-right">
+                          <button 
+                            onClick={() => requestDeleteDriver(driver)}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                            title="Delete Driver"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
                   {drivers.length === 0 && (
                     <tr>
-                      <td colSpan={3} className="py-12 text-center text-slate-500 font-medium">No drivers added yet.</td>
+                      <td colSpan={5} className="py-12 text-center text-slate-500 font-medium">No drivers added yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -1459,9 +1667,6 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
               </div>
 
               {serviceRequestsTab === 'pending' ? (() => {
-                const filteredServiceRequests = driverFilter 
-                  ? serviceRequests.filter(t => t.driverId === driverFilter)
-                  : serviceRequests;
                 const paginatedServiceRequests = filteredServiceRequests.slice((serviceRequestsPage - 1) * ITEMS_PER_PAGE, serviceRequestsPage * ITEMS_PER_PAGE);
                 
                 return (
@@ -1474,7 +1679,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                         </span>
                         <button
                           onClick={() => setDriverFilter('')}
-                          className="text-xs bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                          className="text-xs bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 rounded-lg transition-colors font-semibold cursor-pointer"
                         >
                           Show All
                         </button>
@@ -1486,50 +1691,83 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       </div>
                       Pending Service Requests ({filteredServiceRequests.length})
                     </h2>
-                    {filteredServiceRequests.length === 0 ? (
-                      <div className="text-center py-8 bg-slate-50 rounded-xl border border-slate-100 border-dashed">
-                        <p className="text-slate-500 font-medium">No active service requests.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-4">
-                        {paginatedServiceRequests.map(trip => (
-                          <div key={trip.id} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex flex-col md:flex-row md:items-start justify-between gap-5 relative overflow-hidden">
-                            <div className="absolute top-0 left-0 w-1 h-full bg-orange-500"></div>
-                            <div className="flex-1 pl-2">
-                              <div className="flex items-center gap-3 mb-1 flex-wrap">
-                                <p className="font-bold text-lg text-slate-900">{trip.driverName}</p>
-                                <span className="text-slate-400 text-sm font-medium">reported an issue with</span>
-                                <p className="font-bold text-lg text-slate-900">{trip.vehicleName}</p>
-                                {trip.status === 'active' && (
-                                  <span className="ml-2 text-xs font-bold text-slate-900 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md uppercase tracking-wide">
-                                    Currently Driving
-                                  </span>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead>
+                          <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                            <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
+                            <th className="pb-3 font-semibold px-2">Driver & Vehicle</th>
+                            <th className="pb-3 font-semibold px-2">Reported Time</th>
+                            <th className="pb-3 font-semibold px-2">Condition Checks</th>
+                            <th className="pb-3 font-semibold px-2">Reported Issues</th>
+                            <th className="pb-3 font-semibold px-2 text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {paginatedServiceRequests.map((trip, idx) => (
+                            <tr key={trip.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
+                              <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                                {(serviceRequestsPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                              </td>
+                              <td className="py-4 px-2">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-slate-900">{trip.driverName}</span>
+                                  {trip.status === 'active' && (
+                                    <span className="text-[10px] font-bold text-slate-900 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded uppercase tracking-wide">
+                                      Currently Driving
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-slate-500 font-medium mt-0.5">{trip.vehicleName}</div>
+                              </td>
+                              <td className="py-4 px-2 text-slate-600 font-medium whitespace-nowrap">
+                                <div className="flex items-center gap-1.5">
+                                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                  {trip.startTime ? formatTime(trip.startTime) : 'Unknown'}
+                                </div>
+                                {trip.startTime && (
+                                  <div className="text-xs text-slate-400 mt-0.5">
+                                    {new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
+                                  </div>
                                 )}
-                              </div>
-                              <p className="text-xs font-medium text-slate-500 mb-2">
-                                <Clock className="w-3 h-3 inline mr-1" /> Reported at {trip.startTime ? formatTime(trip.startTime) : 'Unknown'}
-                              </p>
-                              <div className="flex gap-4 text-xs font-medium text-slate-500 my-2">
-                                <div>Pre-Trip Check: {trip.condition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
+                              </td>
+                              <td className="py-4 px-2 text-xs font-medium text-slate-500 whitespace-nowrap space-y-1">
+                                <div>Pre-Trip: {trip.condition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
                                 {trip.endCondition && (
-                                  <div>Post-Trip Check: {trip.endCondition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
+                                  <div>Post-Trip: {trip.endCondition === 'ok' ? <span className="text-green-600 font-bold">OK</span> : <span className="text-red-500 font-bold">NOT OK</span>}</div>
                                 )}
-                              </div>
-                              <TripConditionDetails trip={trip} />
-                            </div>
-                            <div>
-                              <button 
-                                onClick={() => confirmResolve(trip.id, trip.status)}
-                                className="w-full md:w-auto bg-slate-900 text-white px-5 py-2.5 rounded-xl font-medium hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap flex items-center justify-center gap-2 active:scale-95"
-                              >
-                                <CheckCircle2 className="w-4 h-4" />
-                                Mark Resolved
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                              </td>
+                              <td className="py-4 px-2 min-w-[260px]">
+                                <TripConditionDetails trip={trip} />
+                              </td>
+                              <td className="py-4 px-2 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  <button 
+                                    onClick={() => confirmResolve(trip.id, trip.status)}
+                                    className="bg-slate-900 text-white px-3.5 py-2 rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap flex items-center gap-1.5 active:scale-95 cursor-pointer"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                    Mark Resolved
+                                  </button>
+                                  <button 
+                                    onClick={() => requestDeletePendingService(trip)}
+                                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                    title="Delete Service Request"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                          {filteredServiceRequests.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="py-10 text-center text-slate-500 font-medium">No active service requests.</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                     <Pagination total={filteredServiceRequests.length} current={serviceRequestsPage} onChange={setServiceRequestsPage} />
                   </div>
                 );
@@ -1543,7 +1781,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       {filteredResolvedTrips.length > 0 && (
                         <button
                           onClick={downloadCostsAsCSV}
-                          className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-medium transition-colors shadow-sm whitespace-nowrap text-sm"
+                          className="flex items-center gap-2 bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-xl font-medium transition-colors shadow-sm whitespace-nowrap text-sm cursor-pointer"
                         >
                           <Download className="w-4 h-4" /> Export Costs Report
                         </button>
@@ -1600,7 +1838,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                               setServiceTypeFilter('all');
                               setResolvedCostsPage(1);
                             }}
-                            className="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg transition-colors font-semibold"
+                            className="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg transition-colors font-semibold cursor-pointer"
                           >
                             Clear Filters
                           </button>
@@ -1628,6 +1866,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                       <table className="w-full text-left text-sm">
                         <thead>
                           <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                            <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                             <th className="pb-3 font-semibold px-2">Vehicle & Driver</th>
                             <th className="pb-3 font-semibold px-2">Resolved Date</th>
                             <th className="pb-3 font-semibold px-2">Resolved Time</th>
@@ -1635,11 +1874,15 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                             <th className="pb-3 font-semibold px-2">Shop / Dealer</th>
                             <th className="pb-3 font-semibold px-2">Cost (OMR)</th>
                             <th className="pb-3 font-semibold px-2">Receipt</th>
+                            <th className="pb-3 font-semibold px-2 text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                          {paginatedResolved.map(trip => (
+                          {paginatedResolved.map((trip, idx) => (
                             <tr key={trip.id} className="text-slate-800 align-middle hover:bg-slate-50 transition-colors">
+                              <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                                {(resolvedCostsPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                              </td>
                               <td className="py-4 px-2">
                                 <div className="font-semibold text-slate-900">{trip.vehicleName}</div>
                                 <div className="text-xs text-slate-500 font-medium mt-0.5">Reported by {trip.driverName}</div>
@@ -1668,7 +1911,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                   <button
                                     type="button"
                                     onClick={() => setPreviewImageUrl(trip.billImage!)}
-                                    className="p-1 hover:bg-slate-100 rounded-lg transition-colors border border-slate-100 inline-block overflow-hidden"
+                                    className="p-1 hover:bg-slate-100 rounded-lg transition-colors border border-slate-100 inline-block overflow-hidden cursor-pointer"
                                     title="Click to view receipt"
                                   >
                                     <img src={trip.billImage} alt="Receipt Thumbnail" className="h-8 w-8 object-cover rounded-md" />
@@ -1677,11 +1920,21 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                   <span className="text-xs text-slate-400 italic">No receipt</span>
                                 )}
                               </td>
+                              <td className="py-4 px-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => requestDeleteResolvedCost(trip)}
+                                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                  title="Delete Record"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
                             </tr>
                           ))}
                           {filteredResolvedTrips.length === 0 && (
                             <tr>
-                              <td colSpan={6} className="py-12 text-center text-slate-500 font-medium">No resolved costs log matching selected filters.</td>
+                              <td colSpan={9} className="py-12 text-center text-slate-500 font-medium">No resolved costs log matching selected filters.</td>
                             </tr>
                           )}
                         </tbody>
@@ -1704,50 +1957,88 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
               <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center">
                  <span className="w-2.5 h-2.5 rounded-full bg-slate-900 animate-pulse"></span>
               </div>
-              Active Trips
+              Active Trips ({activeTrips.length})
             </h2>
-            {activeTrips.length === 0 ? (
-              <div className="text-center py-8 bg-slate-50 rounded-xl border border-slate-100 border-dashed">
-                <p className="text-slate-500 font-medium">No drivers currently on the road.</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {paginatedActiveTrips.map(trip => (
-                  <div key={trip.id} className="border border-slate-200 rounded-xl p-5 bg-white shadow-sm hover:shadow-md transition-shadow">
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                      <div>
-                        <p className="font-semibold text-lg text-slate-900">{trip.driverName} <span className="text-slate-500 text-base font-normal mx-1">in</span> {trip.vehicleName}</p>
-                        <p className="text-sm text-slate-500 flex items-center gap-1.5 mt-1.5 font-medium">
-                          <Clock className="w-4 h-4 text-slate-900" /> Started at {trip.startTime ? formatTime(trip.startTime) : 'Unknown'}
-                        </p>
-                      </div>
-                      
-                      <div className="flex items-center gap-3">
-                        {trip.serviceNeeded && (
-                          <div className="flex items-center text-orange-700 bg-orange-50 border border-orange-200 px-3 py-1.5 rounded-lg text-sm font-semibold">
-                            <Wrench className="w-4 h-4 mr-1.5" />
-                            Maintenance Requested
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                    <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
+                    <th className="pb-3 font-semibold px-2">Driver & Vehicle</th>
+                    <th className="pb-3 font-semibold px-2">Start Time</th>
+                    <th className="pb-3 font-semibold px-2">Status & Condition</th>
+                    <th className="pb-3 font-semibold px-2">Reported Issues</th>
+                    <th className="pb-3 font-semibold px-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {paginatedActiveTrips.map((trip, idx) => (
+                    <tr key={trip.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
+                      <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                        {(activeTripsPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                      </td>
+                      <td className="py-4 px-2">
+                        <div className="font-semibold text-slate-900">{trip.driverName}</div>
+                        <div className="text-xs text-slate-500 font-medium mt-0.5">{trip.vehicleName}</div>
+                      </td>
+                      <td className="py-4 px-2 text-slate-600 font-medium whitespace-nowrap">
+                        <div className="flex items-center gap-1.5">
+                          <Clock className="w-4 h-4 text-slate-900" />
+                          <span>{trip.startTime ? formatTime(trip.startTime) : 'Unknown'}</span>
+                        </div>
+                        {trip.startTime && (
+                          <div className="text-xs text-slate-400 mt-0.5">
+                            {new Date(trip.startTime).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
                           </div>
+                        )}
+                      </td>
+                      <td className="py-4 px-2 whitespace-nowrap">
+                        {trip.serviceNeeded && (
+                          <span className="inline-flex items-center text-orange-700 bg-orange-50 border border-orange-200 px-3 py-1 rounded-lg text-xs font-semibold">
+                            <Wrench className="w-3.5 h-3.5 mr-1.5" />
+                            Maintenance Requested
+                          </span>
                         )}
                         {trip.condition === 'not_ok' && !trip.serviceNeeded && (
-                          <div className="flex items-center text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-semibold">
-                            <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                          <span className="inline-flex items-center text-green-700 bg-green-50 border border-green-200 px-3 py-1 rounded-lg text-xs font-semibold">
+                            <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
                             Issues Resolved
-                          </div>
+                          </span>
                         )}
                         {trip.condition === 'ok' && !trip.serviceNeeded && (
-                          <div className="flex items-center text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-lg text-sm font-semibold">
-                            <CheckCircle2 className="w-4 h-4 mr-1.5" />
+                          <span className="inline-flex items-center text-green-700 bg-green-50 border border-green-200 px-3 py-1 rounded-lg text-xs font-semibold">
+                            <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
                             Condition OK
-                          </div>
+                          </span>
                         )}
-                      </div>
-                    </div>
-                    <IssueDetails trip={trip} />
-                  </div>
-                ))}
-              </div>
-            )}
+                      </td>
+                      <td className="py-4 px-2 min-w-[260px]">
+                        {trip.condition === 'not_ok' ? (
+                          <IssueDetails trip={trip} />
+                        ) : (
+                          <span className="text-xs text-slate-400 italic">No issues reported</span>
+                        )}
+                      </td>
+                      <td className="py-4 px-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => requestDeleteActiveTrip(trip)}
+                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                          title="Delete Active Trip"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {activeTrips.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="py-10 text-center text-slate-500 font-medium">No drivers currently on the road.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
             <Pagination total={activeTrips.length} current={activeTripsPage} onChange={setActiveTripsPage} />
           </div>
           );
@@ -1813,16 +2104,21 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
               <table className="w-full text-left text-sm">
                 <thead>
                   <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                    <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                     <th className="pb-3 font-semibold px-2">Driver & Vehicle</th>
                     <th className="pb-3 font-semibold px-2">Date</th>
                     <th className="pb-3 font-semibold px-2">Timing</th>
                     <th className="pb-3 font-semibold px-2">Duration</th>
                     <th className="pb-3 font-semibold px-2">Condition Checks & Service</th>
+                    <th className="pb-3 font-semibold px-2 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {paginatedHistory.map(trip => (
+                  {paginatedHistory.map((trip, idx) => (
                     <tr key={trip.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
+                       <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                        {(historyPage - 1) * ITEMS_PER_PAGE + idx + 1}
+                      </td>
                        <td className="py-4 px-2">
                         <div className="font-semibold text-slate-900">{trip.driverName}</div>
                         <div className="text-xs text-slate-500 font-medium mt-0.5">{trip.vehicleName}</div>
@@ -1871,11 +2167,21 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                            <TripConditionDetails trip={trip} />
                          </div>
                       </td>
+                      <td className="py-4 px-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => requestDeleteTripHistory(trip)}
+                          className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                          title="Delete Trip Record"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                   {filteredCompletedTrips.length === 0 && (
                     <tr>
-                      <td colSpan={4} className="py-12 text-center text-slate-500 font-medium">No trips matched the selected date filter.</td>
+                      <td colSpan={7} className="py-12 text-center text-slate-500 font-medium">No trips matched the selected date filter.</td>
                     </tr>
                   )}
                 </tbody>
@@ -2017,15 +2323,20 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b-2 border-slate-100 text-slate-500 uppercase tracking-wider text-xs">
+                      <th className="pb-3 font-semibold px-2 w-16">Sl. No.</th>
                       <th className="pb-3 font-semibold px-2">Driver</th>
                       <th className="pb-3 font-semibold px-2">Date</th>
                       <th className="pb-3 font-semibold px-2">Daily Summary</th>
                       <th className="pb-3 font-semibold px-2">Trips Breakdown</th>
+                      <th className="pb-3 font-semibold px-2 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {paginatedOvertime.map(log => (
+                    {paginatedOvertime.map((log, idx) => (
                       <tr key={log.id} className="text-slate-800 align-top hover:bg-slate-50 transition-colors">
+                        <td className="py-4 px-2 font-semibold text-slate-500 text-xs">
+                          {(overtimePage - 1) * ITEMS_PER_PAGE + idx + 1}
+                        </td>
                         <td className="py-4 px-2 font-semibold text-slate-900">{log.driverName}</td>
                         <td className="py-4 px-2 font-semibold text-slate-700 whitespace-nowrap">
                           {new Date(log.dateStr).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })}
@@ -2038,7 +2349,7 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                           <button
                             type="button"
                             onClick={() => toggleExpandLog(log.id)}
-                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none focus:ring-0 active:scale-95"
+                            className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-semibold transition-colors focus:outline-none focus:ring-0 active:scale-95 cursor-pointer"
                           >
                             <span>{expandedLogIds[log.id] ? 'Hide Details' : 'Show Details'}</span>
                             {expandedLogIds[log.id] ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
@@ -2053,19 +2364,39 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                                       {trip.startTime ? formatTime(trip.startTime) : '-'} <span className="text-slate-300 mx-1">→</span> {trip.endTime ? formatTime(trip.endTime) : '-'}
                                     </div>
                                   </div>
-                                  <div className="font-bold text-slate-700 shrink-0 text-xs md:text-end">
-                                    {trip.duration ? formatDuration(trip.duration) : '-'}
+                                  <div className="flex items-center gap-3 shrink-0">
+                                    <div className="font-bold text-slate-700 text-xs md:text-end">
+                                      {trip.duration ? formatDuration(trip.duration) : '-'}
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => requestDeleteSingleOvertimeTrip(trip, log.driverName)}
+                                      className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                      title="Delete This Trip"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
                                   </div>
                                 </div>
                               ))}
                             </div>
                           )}
                         </td>
+                        <td className="py-4 px-2 text-right">
+                          <button
+                            type="button"
+                            onClick={() => requestDeleteOvertimeLog(log)}
+                            className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                            title="Delete Overtime Log"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </td>
                       </tr>
                     ))}
                     {filteredOvertimeLogs.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="py-12 text-center text-slate-500 font-medium">
+                        <td colSpan={6} className="py-12 text-center text-slate-500 font-medium">
                           No overtime logs match the selected timeframe filter.
                         </td>
                       </tr>
@@ -2234,6 +2565,63 @@ function TripConditionDetails({ trip }: { trip: Trip }) {
                 className="flex-1 py-3 px-4 rounded-xl font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-sm disabled:opacity-50 active:scale-95 flex items-center justify-center gap-2"
               >
                 {isUploading ? 'Uploading Image...' : 'Resolve'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl p-6 shadow-2xl w-full max-w-md border border-slate-200">
+            <div className="flex items-center gap-3 text-red-600 mb-4">
+              <div className="w-12 h-12 rounded-full bg-red-100 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">{deleteTarget.title}</h3>
+                <p className="text-xs text-slate-500 font-medium">Please confirm this action</p>
+              </div>
+            </div>
+
+            <p className="text-sm text-slate-650 leading-relaxed mb-4">
+              {deleteTarget.description}
+            </p>
+
+            {deleteTarget.itemDetails && deleteTarget.itemDetails.length > 0 && (
+              <div className="bg-slate-50 rounded-xl p-3 mb-5 border border-slate-100 text-xs space-y-1.5">
+                {deleteTarget.itemDetails.map((detail, idx) => (
+                  <div key={idx} className="flex justify-between items-center gap-2">
+                    <span className="text-slate-500 font-medium shrink-0">{detail.label}:</span>
+                    <span className="text-slate-900 font-semibold text-right truncate">{detail.value}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={isDeleting}
+                className="flex-1 py-2.5 px-4 rounded-xl font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 transition-colors disabled:opacity-50 cursor-pointer text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={isDeleting}
+                className="flex-1 py-2.5 px-4 rounded-xl font-bold text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm disabled:opacity-50 active:scale-95 flex items-center justify-center gap-2 cursor-pointer text-sm"
+              >
+                {isDeleting ? (
+                  <span>Deleting...</span>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>Delete</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

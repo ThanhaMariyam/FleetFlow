@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { db } from '../firebase';
-import { collection, onSnapshot, query, addDoc, updateDoc, doc } from 'firebase/firestore';
+import { collection, onSnapshot, query, addDoc, updateDoc, doc, deleteDoc } from 'firebase/firestore';
 import { Driver, Vehicle, Trip } from '../types';
 import { ShieldCheck, AlertCircle, Wrench, Play, Square, Truck, Route, Clock, CheckCircle2, Check, ArrowLeft, AlertTriangle, ChevronDown } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -89,6 +89,8 @@ export default function DriverPanel() {
   
   // Active Trip State
   const [activeTripId, setActiveTripId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
 
   const [trips, setTrips] = useState<Trip[]>([]);
   const [activeSubTab, setActiveSubTab] = useState<'terminal' | 'history'>('terminal');
@@ -181,7 +183,24 @@ export default function DriverPanel() {
   const handleSetupNext = () => {
     if (selectedDriverId && selectedVehicleId) {
       localStorage.setItem('fleetflow_driver_id', selectedDriverId);
-      // Check if chosen vehicle has any pending service requests (pre-trip or post-trip)
+
+      // 1. Guard: Check if chosen driver already has an active trip in trips list
+      const existingDriverActiveTrip = trips.find(t => t.driverId === selectedDriverId && t.status === 'active');
+      if (existingDriverActiveTrip) {
+        setActiveTripId(existingDriverActiveTrip.id);
+        setSelectedVehicleId(existingDriverActiveTrip.vehicleId);
+        setStep('driving');
+        return;
+      }
+
+      // 2. Guard: Check if chosen vehicle is already in an active trip with another driver
+      const vehicleActiveTrip = trips.find(t => t.vehicleId === selectedVehicleId && t.status === 'active' && t.driverId !== selectedDriverId);
+      if (vehicleActiveTrip) {
+        alert(t('vehicleInUseByAnother', { driver: vehicleActiveTrip.driverName }));
+        return;
+      }
+
+      // 3. Check if chosen vehicle has any pending service requests (pre-trip or post-trip)
       const vehicleServiceTrip = trips.find(t => t.vehicleId === selectedVehicleId && (t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded)));
       if (vehicleServiceTrip) {
         setActiveTripId(vehicleServiceTrip.id);
@@ -203,67 +222,104 @@ export default function DriverPanel() {
 
   const handleChecklistSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isDriveable === null) return;
+    if (isDriveable === null || isSubmittingRef.current) return;
 
     if (isDriveable) {
       setStep('ready');
     } else {
-      // Request service
-      const driver = drivers.find(d => d.id === selectedDriverId);
-      const vehicle = vehicles.find(v => v.id === selectedVehicleId);
-      if (!driver || !vehicle) return;
+      isSubmittingRef.current = true;
+      setIsSubmitting(true);
+      try {
+        const driver = drivers.find(d => d.id === selectedDriverId);
+        const vehicle = vehicles.find(v => v.id === selectedVehicleId);
+        if (!driver || !vehicle) return;
 
-      const newTrip: Omit<Trip, 'id'> = {
-        driverId: driver.id,
-        driverName: driver.name,
-        vehicleId: vehicle.id,
-        vehicleName: vehicle.name,
-        status: 'waiting_service',
-        condition: 'not_ok',
-        serviceNeeded: true,
-        checklist,
-        remarks
-      };
+        const newTrip: Omit<Trip, 'id'> = {
+          driverId: driver.id,
+          driverName: driver.name,
+          vehicleId: vehicle.id,
+          vehicleName: vehicle.name,
+          status: 'waiting_service',
+          condition: 'not_ok',
+          serviceNeeded: true,
+          checklist,
+          remarks
+        };
 
-      const docRef = await addDoc(collection(db, 'trips'), newTrip);
-      setActiveTripId(docRef.id);
-      setStep('waiting_service');
+        const docRef = await addDoc(collection(db, 'trips'), newTrip);
+        setActiveTripId(docRef.id);
+        setStep('waiting_service');
+      } catch (err: any) {
+        console.error('Failed to submit service request:', err);
+        alert('Failed to submit service request: ' + (err.message || err));
+      } finally {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      }
     }
   };
 
   const handleStartDriving = async () => {
-    if (activeTripId) {
-      // It means they were waiting for service and now it's completed
-      await updateDoc(doc(db, 'trips', activeTripId), {
-        status: 'active',
-        startTime: Date.now()
-      });
-      setStep('driving');
-    } else {
-      // Regular start
-      const driver = drivers.find(d => d.id === selectedDriverId);
-      const vehicle = vehicles.find(v => v.id === selectedVehicleId);
-      if (!driver || !vehicle) return;
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
 
-      const newTrip: Omit<Trip, 'id'> = {
-        driverId: driver.id,
-        driverName: driver.name,
-        vehicleId: vehicle.id,
-        vehicleName: vehicle.name,
-        status: 'active',
-        startTime: Date.now(),
-        condition: condition!,
-        serviceNeeded: condition === 'not_ok' ? serviceNeeded : false,
-      };
+    try {
+      if (activeTripId) {
+        // Waiting for service and now completed
+        await updateDoc(doc(db, 'trips', activeTripId), {
+          status: 'active',
+          startTime: Date.now()
+        });
+        setStep('driving');
+      } else {
+        // Concurrency Guard: Check if this driver ALREADY has an active trip
+        const existingActiveTrip = trips.find(t => t.driverId === selectedDriverId && t.status === 'active');
+        if (existingActiveTrip) {
+          setActiveTripId(existingActiveTrip.id);
+          setSelectedVehicleId(existingActiveTrip.vehicleId);
+          setStep('driving');
+          return;
+        }
 
-      if (condition === 'not_ok') {
-        newTrip.checklist = checklist;
-        newTrip.remarks = remarks;
+        // Concurrency Guard: Check if the vehicle is currently active with another driver
+        const vehicleActiveTrip = trips.find(t => t.vehicleId === selectedVehicleId && t.status === 'active' && t.driverId !== selectedDriverId);
+        if (vehicleActiveTrip) {
+          alert(t('vehicleInUseByAnother', { driver: vehicleActiveTrip.driverName }));
+          return;
+        }
+
+        // Regular start
+        const driver = drivers.find(d => d.id === selectedDriverId);
+        const vehicle = vehicles.find(v => v.id === selectedVehicleId);
+        if (!driver || !vehicle) return;
+
+        const newTrip: Omit<Trip, 'id'> = {
+          driverId: driver.id,
+          driverName: driver.name,
+          vehicleId: vehicle.id,
+          vehicleName: vehicle.name,
+          status: 'active',
+          startTime: Date.now(),
+          condition: condition!,
+          serviceNeeded: condition === 'not_ok' ? serviceNeeded : false,
+        };
+
+        if (condition === 'not_ok') {
+          newTrip.checklist = checklist;
+          newTrip.remarks = remarks;
+        }
+
+        const docRef = await addDoc(collection(db, 'trips'), newTrip);
+        setActiveTripId(docRef.id);
+        setStep('driving');
       }
-
-      const docRef = await addDoc(collection(db, 'trips'), newTrip);
-      setActiveTripId(docRef.id);
-      setStep('driving');
+    } catch (err: any) {
+      console.error('Failed to start driving:', err);
+      alert('Failed to start trip: ' + (err.message || err));
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
     }
   };
 
@@ -272,10 +328,63 @@ export default function DriverPanel() {
   };
 
   const handlePostConditionSelect = async (isOk: boolean) => {
-    if (!activeTripId) return;
+    if (!activeTripId || isSubmittingRef.current) return;
     setPostCondition(isOk ? 'ok' : 'not_ok');
     
     if (isOk) {
+      isSubmittingRef.current = true;
+      setIsSubmitting(true);
+      try {
+        const endTime = Date.now();
+        const docRef = doc(db, 'trips', activeTripId);
+        const { getDoc } = await import('firebase/firestore');
+        const snap = await getDoc(docRef);
+        if (snap.exists()) {
+          const tripData = snap.data() as Trip;
+          const duration = tripData.startTime ? (endTime - tripData.startTime) : 0;
+          await updateDoc(docRef, {
+            status: 'completed',
+            endTime: endTime,
+            duration: duration,
+            endCondition: 'ok',
+            endServiceNeeded: false
+          });
+
+          // Duplicate cleanup: If any duplicate active trip was created around the same start time, remove it
+          const duplicateActiveTrips = trips.filter(
+            t => t.id !== activeTripId &&
+                 t.driverId === selectedDriverId &&
+                 t.status === 'active' &&
+                 Math.abs((t.startTime || 0) - (tripData.startTime || 0)) < 5 * 60 * 1000
+          );
+          for (const dup of duplicateActiveTrips) {
+            try {
+              await deleteDoc(doc(db, 'trips', dup.id));
+            } catch (dupErr) {
+              console.warn('Failed to clean duplicate active trip:', dupErr);
+            }
+          }
+        }
+        resetAllStates();
+      } catch (err: any) {
+        console.error('Failed to complete trip:', err);
+        alert('Failed to complete trip: ' + (err.message || err));
+      } finally {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+      }
+    } else {
+      setStep('post_checklist');
+    }
+  };
+
+  const handlePostChecklistSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeTripId || postIsDriveable === null || isSubmittingRef.current) return;
+
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    try {
       const endTime = Date.now();
       const docRef = doc(db, 'trips', activeTripId);
       const { getDoc } = await import('firebase/firestore');
@@ -287,38 +396,35 @@ export default function DriverPanel() {
           status: 'completed',
           endTime: endTime,
           duration: duration,
-          endCondition: 'ok',
-          endServiceNeeded: false
+          endCondition: 'not_ok',
+          endChecklist: postChecklist,
+          endRemarks: postRemarks,
+          endServiceNeeded: !postIsDriveable || postServiceNeeded
         });
+
+        // Duplicate cleanup: If any duplicate active trip was created around the same start time, remove it
+        const duplicateActiveTrips = trips.filter(
+          t => t.id !== activeTripId &&
+               t.driverId === selectedDriverId &&
+               t.status === 'active' &&
+               Math.abs((t.startTime || 0) - (tripData.startTime || 0)) < 5 * 60 * 1000
+        );
+        for (const dup of duplicateActiveTrips) {
+          try {
+            await deleteDoc(doc(db, 'trips', dup.id));
+          } catch (dupErr) {
+            console.warn('Failed to clean duplicate active trip:', dupErr);
+          }
+        }
       }
       resetAllStates();
-    } else {
-      setStep('post_checklist');
+    } catch (err: any) {
+      console.error('Failed to submit post-trip report:', err);
+      alert('Failed to submit post-trip report: ' + (err.message || err));
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
     }
-  };
-
-  const handlePostChecklistSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeTripId || postIsDriveable === null) return;
-
-    const endTime = Date.now();
-    const docRef = doc(db, 'trips', activeTripId);
-    const { getDoc } = await import('firebase/firestore');
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
-      const tripData = snap.data() as Trip;
-      const duration = tripData.startTime ? (endTime - tripData.startTime) : 0;
-      await updateDoc(docRef, {
-        status: 'completed',
-        endTime: endTime,
-        duration: duration,
-        endCondition: 'not_ok',
-        endChecklist: postChecklist,
-        endRemarks: postRemarks,
-        endServiceNeeded: !postIsDriveable || postServiceNeeded
-      });
-    }
-    resetAllStates();
   };
 
   const resetAllStates = () => {
@@ -336,6 +442,8 @@ export default function DriverPanel() {
     setPostIsDriveable(null);
     setPostServiceNeeded(false);
     setActiveTripId(null);
+    setIsSubmitting(false);
+    isSubmittingRef.current = false;
   };
 
   const toggleChecklist = (item: string) => {
@@ -537,9 +645,21 @@ export default function DriverPanel() {
                       className="w-full border border-slate-200 rounded-xl px-4 py-3 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-slate-900 outline-none transition-all text-slate-800"
                     >
                       <option value="" disabled>{t('chooseVehicle')}</option>
-                      {vehicles.map(v => (
-                        <option key={v.id} value={v.id}>{v.name}</option>
-                      ))}
+                      {vehicles.map(v => {
+                        const isVehicleActive = trips.some(t => t.vehicleId === v.id && t.status === 'active' && t.driverId !== selectedDriverId);
+                        const isVehicleServiceNeeded = trips.some(t => t.vehicleId === v.id && (t.status === 'waiting_service' || t.serviceNeeded || (t.status === 'completed' && t.endServiceNeeded)));
+                        let labelSuffix = '';
+                        if (isVehicleActive) {
+                          labelSuffix = ` (${t('inTrip')})`;
+                        } else if (isVehicleServiceNeeded) {
+                          labelSuffix = ` (${t('serviceRequested')})`;
+                        }
+                        return (
+                          <option key={v.id} value={v.id} disabled={isVehicleActive}>
+                            {v.name}{labelSuffix}
+                          </option>
+                        );
+                      })}
                     </select>
                   </div>
 
@@ -731,9 +851,17 @@ export default function DriverPanel() {
                   <div className="space-y-3">
                     <button 
                       onClick={handleStartDriving}
-                      className="w-full bg-slate-900 text-white text-lg font-bold py-4 rounded-xl shadow-lg shadow-slate-200 hover:bg-slate-800 transition-all active:scale-95"
+                      disabled={isSubmitting}
+                      className="w-full bg-slate-900 text-white text-lg font-bold py-4 rounded-xl shadow-lg shadow-slate-200 hover:bg-slate-800 transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer flex items-center justify-center gap-2"
                     >
-                      {t('startDriving')}
+                      {isSubmitting ? (
+                        <>
+                          <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                          <span>{t('startingTrip')}</span>
+                        </>
+                      ) : (
+                        t('startDriving')
+                      )}
                     </button>
                     <button 
                       onClick={() => {
@@ -746,7 +874,8 @@ export default function DriverPanel() {
                         setServiceNeeded(false);
                         setStep('setup');
                       }}
-                      className="w-full text-slate-500 hover:text-slate-800 font-semibold py-2.5 rounded-xl transition-colors text-sm"
+                      disabled={isSubmitting}
+                      className="w-full text-slate-500 hover:text-slate-800 font-semibold py-2.5 rounded-xl transition-colors text-sm disabled:opacity-50 cursor-pointer"
                     >
                       {t('chooseDifferentVehicle')}
                     </button>
@@ -803,18 +932,20 @@ export default function DriverPanel() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <button 
                       onClick={() => handlePostConditionSelect(true)}
-                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white"
+                      disabled={isSubmitting}
+                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white disabled:opacity-50 cursor-pointer"
                     >
                       <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
                         <Check className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
                       </div>
-                      <span className="font-bold text-slate-800">{t('allGood')}</span>
+                      <span className="font-bold text-slate-800">{isSubmitting ? t('endingTrip') : t('allGood')}</span>
                       <span className="text-xs text-slate-400 mt-1">{t('noIssuesArose')}</span>
                     </button>
 
                     <button 
                       onClick={() => handlePostConditionSelect(false)}
-                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white"
+                      disabled={isSubmitting}
+                      className="flex flex-col items-center justify-center p-6 border-2 border-slate-200 rounded-xl hover:border-slate-950 transition-all group active:scale-98 bg-white disabled:opacity-50 cursor-pointer"
                     >
                       <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3 group-hover:bg-slate-950 transition-colors">
                         <AlertTriangle className="w-6 h-6 text-slate-800 group-hover:text-white transition-colors" />
@@ -827,7 +958,8 @@ export default function DriverPanel() {
                   <div className="border-t border-slate-100 pt-4 flex justify-center">
                     <button
                       onClick={() => setStep('driving')}
-                      className="text-sm font-semibold text-slate-500 hover:text-slate-800 py-2 px-4 transition-colors"
+                      disabled={isSubmitting}
+                      className="text-sm font-semibold text-slate-500 hover:text-slate-800 py-2 px-4 transition-colors disabled:opacity-50 cursor-pointer"
                     >
                       {t('cancelReturnTrip')}
                     </button>
@@ -924,10 +1056,17 @@ export default function DriverPanel() {
                       </button>
                       <button
                         type="submit"
-                        disabled={postIsDriveable === null}
-                        className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-bold text-sm shadow-md hover:bg-slate-800 transition-all disabled:opacity-50 active:scale-98"
+                        disabled={postIsDriveable === null || isSubmitting}
+                        className="flex-1 py-3.5 bg-slate-900 text-white rounded-xl font-bold text-sm shadow-md hover:bg-slate-800 transition-all disabled:opacity-50 active:scale-98 cursor-pointer flex items-center justify-center gap-2"
                       >
-                        {t('submitEndTrip')}
+                        {isSubmitting ? (
+                          <>
+                            <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+                            <span>{t('endingTrip')}</span>
+                          </>
+                        ) : (
+                          t('submitEndTrip')
+                        )}
                       </button>
                     </div>
                   </form>
